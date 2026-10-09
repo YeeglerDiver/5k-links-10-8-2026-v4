@@ -22,7 +22,7 @@ function downloadBuffer(url) {
         return downloadBuffer(res.headers.location).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) {
-        return reject(new Error(`Failed to fetch ${url}, status: ${res.statusCode}`));
+        return reject(new Error(`Failed to fetch ${url}, status:${res.statusCode}`));
       }
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
@@ -92,54 +92,35 @@ async function runBuild() {
     }
   }
 
-  // 3. Fix Scramjet double WASM extension bug
-  const scramjetDir = path.join(distDir, "runtime", "scramjet");
-  if (fs.existsSync(scramjetDir)) {
-    const wasmFile = path.join(scramjetDir, "scramjet.wasm");
-    const doubleWasmFile = path.join(scramjetDir, "scramjet.wasm.wasm");
-    if (fs.existsSync(wasmFile) && !fs.existsSync(doubleWasmFile)) {
-      fs.copyFileSync(wasmFile, doubleWasmFile);
-    }
-  }
-
-  // 4. Mirror all assets to root for flat lookups
+  // 3. Mirror all assets into root
   copyAllFilesToTarget(path.join(extractDir, "assets"), distDir);
   copyAllFilesToTarget(path.join(extractDir, "runtime"), distDir);
   copyAllFilesToTarget(path.join(extractDir, "branding"), distDir);
 
-  // Mirror baremux/index.js to distDir/index.js if Bare-Mux looks at root
-  const baremuxIndex = path.join(extractDir, "runtime", "baremux", "index.js");
-  if (fs.existsSync(baremuxIndex) && !fs.existsSync(path.join(distDir, "index.js"))) {
-    fs.copyFileSync(baremuxIndex, path.join(distDir, "index.js"));
-  }
-
-  // Preserve local repo assets
-  const localDirs = ["books", "dist"];
-  for (const d of localDirs) {
-    if (fs.existsSync(d)) {
-      fs.cpSync(d, path.join(distDir, d), { recursive: true });
-      copyAllFilesToTarget(path.join(process.cwd(), d), distDir);
+  const scramjetDir = path.join(distDir, "runtime", "scramjet");
+  if (fs.existsSync(scramjetDir)) {
+    const wasmFile = path.join(scramjetDir, "scramjet.wasm");
+    const doubleWasm = path.join(scramjetDir, "scramjet.wasm.wasm");
+    if (fs.existsSync(wasmFile) && !fs.existsSync(doubleWasm)) {
+      fs.copyFileSync(wasmFile, doubleWasm);
     }
   }
 
-  fs.rmSync(tarPath, { force: true });
-
-  // 5. Patch root-relative URLs in files
-  function patchPathsInDirectory(dir) {
+  // 4. Patch absolute paths inside ALL JS, JSON, and HTML bundles
+  function deepPatch(dir) {
     for (const item of fs.readdirSync(dir)) {
       const fullPath = path.join(dir, item);
       const stat = fs.statSync(fullPath);
       if (stat.isDirectory()) {
-        if (item !== ".git") patchPathsInDirectory(fullPath);
+        if (item !== ".git") deepPatch(fullPath);
       } else if (/\.(html|js|json|webmanifest|css)$/i.test(item)) {
         let content = fs.readFileSync(fullPath, "utf8");
         const updated = content
-          .replace(/(['"])\/runtime\//g, `$1${repoPrefix}runtime/`)
-          .replace(/(['"])\/assets\//g, `$1${repoPrefix}assets/`)
-          .replace(/(['"])\/branding\//g, `$1${repoPrefix}branding/`)
-          .replace(/(['"])\/sw\.js(['"])/g, `$1${repoPrefix}sw.js$2`)
-          .replace(/href=["']\/runtime\//gi, `href="${repoPrefix}runtime/`)
-          .replace(/src=["']\/runtime\//gi, `src="${repoPrefix}runtime/`);
+          .replace(/(['"`])\/runtime\//g, `$1${repoPrefix}runtime/`)
+          .replace(/(['"`])\/branding\//g, `$1${repoPrefix}branding/`)
+          .replace(/(['"`])\/assets\//g, `$1${repoPrefix}assets/`)
+          .replace(/(['"`])\/index\.html/g, `$1${repoPrefix}index.html`)
+          .replace(/(['"`])\/sw\.js/g, `$1${repoPrefix}sw.js`);
 
         if (updated !== content) {
           fs.writeFileSync(fullPath, updated, "utf8");
@@ -147,9 +128,9 @@ async function runBuild() {
       }
     }
   }
-  patchPathsInDirectory(distDir);
+  deepPatch(distDir);
 
-  // 6. Build base application template from index.html with CORS/Fetch interceptor
+  // 5. Construct application HTML template
   const rawHtmlPath = path.join(extractDir, "index.html");
   let appHtml = fs.existsSync(rawHtmlPath)
     ? fs.readFileSync(rawHtmlPath, "utf8")
@@ -159,7 +140,6 @@ async function runBuild() {
     .replace(/(href|src)=["']\/(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`)
     .replace(/url\(['"]?\/([^'")]+)['"]?\)/gi, `url("${repoPrefix}$1")`);
 
-  // Interceptor script to catch failing auth/session calls and prevent infinite crash loops
   const mockInterceptor = `
   <base href="${repoPrefix}">
   <script>
@@ -192,24 +172,13 @@ async function runBuild() {
     appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${mockInterceptor}`);
   }
 
+  // Set the app HTML as dist_deploy/index.html so GET /index.html resolves 200
+  fs.writeFileSync(path.join(distDir, "index.html"), appHtml);
+
+  fs.rmSync(tarPath, { force: true });
   fs.rmSync(extractDir, { recursive: true, force: true });
 
-  // 7. Collect essential runtime files to link directly in each subfolder
-  const criticalFiles = [];
-  const candidateFiles = [
-    "index.js",
-    "scramjet.all.js",
-    "scramjet.wasm",
-    "scramjet.wasm.wasm",
-    "sw.js"
-  ];
-  for (const c of candidateFiles) {
-    if (fs.existsSync(path.join(distDir, c))) {
-      criticalFiles.push(c);
-    }
-  }
-
-  // 8. Generate 5,000 subdirectories
+  // 6. Generate 5,000 unique subdirectories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -239,17 +208,11 @@ async function runBuild() {
     fs.mkdirSync(folderPath, { recursive: true });
 
     fs.writeFileSync(path.join(folderPath, "index.html"), appHtml);
-
-    // Copy critical local runtime fallbacks directly into the folder
-    for (const f of criticalFiles) {
-      fs.copyFileSync(path.join(distDir, f), path.join(folderPath, f));
-    }
-
-    masterLinksHtml += `<a class="card" href="./${nestedPath}/">${nestedPath}</a>\n`;
+    masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 9. Site Index
-  const indexHtml = `<!DOCTYPE html>
+  // 7. Directory index available at /directory.html
+  const directoryHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -298,8 +261,8 @@ async function runBuild() {
 </body>
 </html>`;
 
-  fs.writeFileSync(path.join(distDir, "index.html"), indexHtml);
-  console.log("Build complete with patched WASM references and mocked auth routes.");
+  fs.writeFileSync(path.join(distDir, "directory.html"), directoryHtml);
+  console.log("Build successfully completed.");
 }
 
 runBuild();
