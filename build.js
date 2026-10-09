@@ -32,7 +32,7 @@ function downloadBuffer(url) {
   });
 }
 
-// Recursively copy all files found within a source directory directly to a target directory flat
+// Flat copy of all nested files to target root
 function copyAllFilesToRoot(srcDir, targetDir) {
   if (!fs.existsSync(srcDir)) return;
   for (const item of fs.readdirSync(srcDir)) {
@@ -50,7 +50,7 @@ function copyAllFilesToRoot(srcDir, targetDir) {
 }
 
 async function runBuild() {
-  console.log("Downloading full scientific-studying/svg@main repository package...");
+  console.log("Fetching upstream repository package...");
 
   const repoTarUrl = "https://codeload.github.com/scientific-studying/svg/tar.gz/refs/heads/main";
   const tarPath = path.join(process.cwd(), "temp_svg.tar.gz");
@@ -72,7 +72,7 @@ async function runBuild() {
     process.exit(1);
   }
 
-  // 1. Git LFS rules for deployment
+  // 1. Git LFS tracking rules
   const gitattributesContent = [
     "books/html/fnafi/* filter=lfs diff=lfs merge=lfs -text",
     "books/html/fnafi3/* filter=lfs diff=lfs merge=lfs -text",
@@ -82,7 +82,7 @@ async function runBuild() {
   ].join("\n");
   fs.writeFileSync(path.join(distDir, ".gitattributes"), gitattributesContent);
 
-  // 2. Copy remote repo structure directly
+  // 2. Copy remote directory structure
   const remoteItems = fs.readdirSync(extractDir);
   for (const item of remoteItems) {
     const src = path.join(extractDir, item);
@@ -94,12 +94,12 @@ async function runBuild() {
     }
   }
 
-  // 3. Mirror all assets directly into the root of dist_deploy
+  // 3. Mirror all assets to root for flat lookups
   copyAllFilesToRoot(path.join(extractDir, "assets"), distDir);
   copyAllFilesToRoot(path.join(extractDir, "runtime"), distDir);
   copyAllFilesToRoot(path.join(extractDir, "branding"), distDir);
 
-  // Also preserve local books or dist folders if present in the main repo
+  // Preserve local repo assets
   const localDirs = ["books", "dist"];
   for (const d of localDirs) {
     if (fs.existsSync(d)) {
@@ -108,17 +108,44 @@ async function runBuild() {
     }
   }
 
-  // Clean temporary archives
   fs.rmSync(tarPath, { force: true });
 
-  // 4. Prepare application HTML template using the upstream index.html
+  // 4. Patch root-relative URLs in all JS, JSON, and HTML bundles
+  function patchPathsInDirectory(dir) {
+    for (const item of fs.readdirSync(dir)) {
+      const fullPath = path.join(dir, item);
+      const stat = fs.statSync(fullPath);
+      if (stat.isDirectory()) {
+        if (item !== ".git") patchPathsInDirectory(fullPath);
+      } else if (/\.(html|js|json|webmanifest|css)$/i.test(item)) {
+        let content = fs.readFileSync(fullPath, "utf8");
+        const updated = content
+          .replace(/(['"])\/runtime\//g, `$1${repoPrefix}runtime/`)
+          .replace(/(['"])\/assets\//g, `$1${repoPrefix}assets/`)
+          .replace(/(['"])\/branding\//g, `$1${repoPrefix}branding/`)
+          .replace(/(['"])\/sw\.js(['"])/g, `$1${repoPrefix}sw.js$2`)
+          .replace(/href=["']\/runtime\//gi, `href="${repoPrefix}runtime/`)
+          .replace(/src=["']\/runtime\//gi, `src="${repoPrefix}runtime/`);
+
+        if (updated !== content) {
+          fs.writeFileSync(fullPath, updated, "utf8");
+        }
+      }
+    }
+  }
+
+  patchPathsInDirectory(distDir);
+
+  // 5. Build base application template from index.html
   const rawHtmlPath = path.join(extractDir, "index.html");
   let appHtml = fs.existsSync(rawHtmlPath)
     ? fs.readFileSync(rawHtmlPath, "utf8")
     : fs.readFileSync("index.html", "utf8");
 
-  // Fix hardcoded slash paths to respect repository prefix
-  appHtml = appHtml.replace(/(href|src)=["']\/(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`);
+  // Remap standard root attributes
+  appHtml = appHtml
+    .replace(/(href|src)=["']\/(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`)
+    .replace(/url\(['"]?\/([^'")]+)['"]?\)/gi, `url("${repoPrefix}$1")`);
 
   if (!appHtml.includes("<base ")) {
     appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n    <base href="${repoPrefix}">`);
@@ -126,7 +153,7 @@ async function runBuild() {
 
   fs.rmSync(extractDir, { recursive: true, force: true });
 
-  // 5. Generate 5,000 physical nested directories
+  // 6. Generate 5,000 subdirectories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -155,13 +182,11 @@ async function runBuild() {
     const folderPath = path.join(distDir, nestedPath);
     fs.mkdirSync(folderPath, { recursive: true });
 
-    // Place the app entry inside each subpath
     fs.writeFileSync(path.join(folderPath, "index.html"), appHtml);
-
     masterLinksHtml += `<a class="card" href="./${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 6. Directory index dashboard at the site root
+  // 7. Site Index
   const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -212,7 +237,7 @@ async function runBuild() {
 </html>`;
 
   fs.writeFileSync(path.join(distDir, "index.html"), indexHtml);
-  console.log("Successfully built 5,000 pages and copied all asset files to the root level.");
+  console.log("Successfully rebuilt bundles with patched runtime paths.");
 }
 
 runBuild();
