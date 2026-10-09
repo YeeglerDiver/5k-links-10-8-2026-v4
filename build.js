@@ -70,7 +70,7 @@ async function runBuild() {
     process.exit(1);
   }
 
-  // 1. Git LFS tracking rules
+  // 1. Git LFS attributes
   const gitattributesContent = [
     "books/html/fnafi/* filter=lfs diff=lfs merge=lfs -text",
     "books/html/fnafi3/* filter=lfs diff=lfs merge=lfs -text",
@@ -80,7 +80,7 @@ async function runBuild() {
   ].join("\n");
   fs.writeFileSync(path.join(distDir, ".gitattributes"), gitattributesContent);
 
-  // 2. Copy remote directory structure
+  // 2. Mirror remote directory tree
   const remoteItems = fs.readdirSync(extractDir);
   for (const item of remoteItems) {
     const src = path.join(extractDir, item);
@@ -92,75 +92,60 @@ async function runBuild() {
     }
   }
 
-  // 3. Mirror all assets into root
+  // 3. Mirror all assets to root
   copyAllFilesToTarget(path.join(extractDir, "assets"), distDir);
   copyAllFilesToTarget(path.join(extractDir, "runtime"), distDir);
   copyAllFilesToTarget(path.join(extractDir, "branding"), distDir);
 
-  // Duplicate wasm to wasm.wasm to handle the engine requesting scramjet.wasm.wasm
+  // Handle baremux index.js
+  const baremuxIndex = path.join(extractDir, "runtime", "baremux", "index.js");
+  if (fs.existsSync(baremuxIndex)) {
+    fs.copyFileSync(baremuxIndex, path.join(distDir, "index.js"));
+  }
+
+  // Handle scramjet.all.js
+  const scramjetAll = path.join(extractDir, "runtime", "scramjet", "scramjet.all.js");
+  if (fs.existsSync(scramjetAll)) {
+    fs.copyFileSync(scramjetAll, path.join(distDir, "scramjet.all.js"));
+  }
+
+  // Handle scramjet wasm and double-extension
   const scramjetDir = path.join(distDir, "runtime", "scramjet");
   if (fs.existsSync(scramjetDir)) {
     const wasmFile = path.join(scramjetDir, "scramjet.wasm");
     const doubleWasm = path.join(scramjetDir, "scramjet.wasm.wasm");
     if (fs.existsSync(wasmFile)) {
       fs.copyFileSync(wasmFile, doubleWasm);
+      fs.copyFileSync(wasmFile, path.join(distDir, "scramjet.wasm"));
+      fs.copyFileSync(wasmFile, path.join(distDir, "scramjet.wasm.wasm"));
     }
   }
 
-  // 4. Deep search & replace strings across files
-  function deepPatch(dir) {
-    for (const item of fs.readdirSync(dir)) {
-      const fullPath = path.join(dir, item);
-      const stat = fs.statSync(fullPath);
-      if (stat.isDirectory()) {
-        if (item !== ".git") deepPatch(fullPath);
-      } else if (/\.(html|js|json|webmanifest|css)$/i.test(item)) {
-        let content = fs.readFileSync(fullPath, "utf8");
-        const updated = content
-          .replace(/(['"`])\/runtime\//g, `$1${repoPrefix}runtime/`)
-          .replace(/(['"`])\/branding\//g, `$1${repoPrefix}branding/`)
-          .replace(/(['"`])\/assets\//g, `$1${repoPrefix}assets/`)
-          .replace(/(['"`])\/sw\.js/g, `$1${repoPrefix}sw.js`);
-
-        if (updated !== content) {
-          fs.writeFileSync(fullPath, updated, "utf8");
-        }
-      }
-    }
-  }
-  deepPatch(distDir);
-
-  // 5. Build base application template with dynamic fetch & worker redirection
+  // 4. Construct application HTML template
   const rawHtmlPath = path.join(extractDir, "index.html");
   let appHtml = fs.existsSync(rawHtmlPath)
     ? fs.readFileSync(rawHtmlPath, "utf8")
     : fs.readFileSync("index.html", "utf8");
 
+  // Remove preloads that trigger un-prefixed requests
+  appHtml = appHtml.replace(/<link[^>]+rel=["']preload["'][^>]*>/gi, "");
+
+  // Rewrite remaining paths
   appHtml = appHtml
     .replace(/(href|src)=["']\/(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`)
     .replace(/url\(['"]?\/([^'")]+)['"]?\)/gi, `url("${repoPrefix}$1")`);
 
-  // This injector catches window.fetch and Worker creations that target /runtime/ or apex domain
   const runtimeInterceptor = `
   <base href="${repoPrefix}">
   <script>
     (function() {
-      const PREFIX = "${repoPrefix}";
-
-      // 1. Rewrite fetch requests
       const originalFetch = window.fetch;
       window.fetch = async function(...args) {
-        if (typeof args[0] === "string") {
-          if (args[0].startsWith("/runtime/") || args[0].startsWith("/branding/") || args[0].startsWith("/assets/")) {
-            args[0] = PREFIX + args[0].replace(/^\\/+/, "");
-          } else if (args[0] === "/index.html") {
-            args[0] = PREFIX + "index.html";
-          } else if (args[0].includes("/api/auth/session")) {
-            return new Response(JSON.stringify({ user: null, authenticated: false }), {
-              status: 200,
-              headers: { "Content-Type": "application/json" }
-            });
-          }
+        if (typeof args[0] === "string" && args[0].includes("/api/auth/session")) {
+          return new Response(JSON.stringify({ user: null, authenticated: false }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
         }
         try {
           return await originalFetch.apply(this, args);
@@ -174,16 +159,6 @@ async function runBuild() {
           throw err;
         }
       };
-
-      // 2. Rewrite Web Worker constructor calls
-      const OriginalWorker = window.Worker;
-      window.Worker = function(scriptURL, options) {
-        let url = scriptURL.toString();
-        if (url.startsWith("/runtime/") || url.startsWith("/assets/")) {
-          url = PREFIX + url.replace(/^\\/+/, "");
-        }
-        return new OriginalWorker(url, options);
-      };
     })();
   </script>`;
 
@@ -191,10 +166,45 @@ async function runBuild() {
     appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${runtimeInterceptor}`);
   }
 
+  // 5. Setup SPA 404 Fallback
+  const spaFallback = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script>
+    const path = window.location.pathname;
+    if (!path.startsWith("${repoPrefix}")) {
+      window.location.replace("${repoPrefix}" + path.replace(/^\\/+/, "") + window.location.search + window.location.hash);
+    } else {
+      window.location.replace("${repoPrefix}");
+    }
+  </script>
+</head>
+<body></body>
+</html>`;
+  fs.writeFileSync(path.join(distDir, "404.html"), spaFallback);
+
   fs.rmSync(tarPath, { force: true });
   fs.rmSync(extractDir, { recursive: true, force: true });
 
-  // 6. Generate 5,000 unique directories
+  // 6. Collect critical runtime assets that subpaths request locally
+  const filesToMirrorLocally = [
+    "index.js",
+    "scramjet.all.js",
+    "scramjet.wasm",
+    "scramjet.wasm.wasm",
+    "sw.js"
+  ];
+
+  const availableFiles = {};
+  for (const f of filesToMirrorLocally) {
+    const fullPath = path.join(distDir, f);
+    if (fs.existsSync(fullPath)) {
+      availableFiles[f] = fs.readFileSync(fullPath);
+    }
+  }
+
+  // 7. Generate 5,000 subdirectories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -223,12 +233,18 @@ async function runBuild() {
     const folderPath = path.join(distDir, nestedPath);
     fs.mkdirSync(folderPath, { recursive: true });
 
-    // Subpaths get the full app runner
+    // HTML entry
     fs.writeFileSync(path.join(folderPath, "index.html"), appHtml);
+
+    // Place the four runtime scripts directly in the folder so relative requests succeed
+    for (const [name, buf] of Object.entries(availableFiles)) {
+      fs.writeFileSync(path.join(folderPath, name), buf);
+    }
+
     masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 7. Site Index (The main landing page displays the 5,000 links directory)
+  // 8. Site Index Dashboard
   const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -279,7 +295,7 @@ async function runBuild() {
 </html>`;
 
   fs.writeFileSync(path.join(distDir, "index.html"), indexHtml);
-  console.log("Build successfully completed!");
+  console.log("Build successfully completed with local worker mirror support.");
 }
 
 runBuild();
