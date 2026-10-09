@@ -22,7 +22,7 @@ execSync(`curl -sL "https://codeload.github.com/scientific-studying/svg/tar.gz/r
 execSync(`tar -xzf "${tarPath}" -C "${distDir}" --strip-components=1`);
 fs.rmSync(tarPath, { force: true });
 
-// 2. Rename root index.html to app.html so it can be loaded as the root iframe target
+// 2. Rename root index.html to app.html
 const origHtml = path.join(distDir, "index.html");
 const appShellHtml = path.join(distDir, "app.html");
 if (fs.existsSync(origHtml)) {
@@ -32,7 +32,6 @@ if (fs.existsSync(origHtml)) {
 // 3. Patch Scramjet prefix (/scram/ -> /<repoName>/scram/) across runtime files
 const prefixRegex = /(['"`])\/scram\//g;
 
-// Patch Service Worker
 const swPath = path.join(distDir, "sw.js");
 if (fs.existsSync(swPath)) {
   let swCode = fs.readFileSync(swPath, "utf8");
@@ -40,27 +39,42 @@ if (fs.existsSync(swPath)) {
   fs.writeFileSync(swPath, swCode);
 }
 
-// Patch app.html
-if (fs.existsSync(appShellHtml)) {
-  let htmlCode = fs.readFileSync(appShellHtml, "utf8");
-  htmlCode = htmlCode.replace(prefixRegex, `$1${fullScramPrefix}`);
-  fs.writeFileSync(appShellHtml, htmlCode);
-}
+// 4. Overwrite dead hardcoded domains inside all asset bundles with live public Wisp servers
+const TARGET_WISP_WS = "wss://wisp.mercurywork.shop/";
+const TARGET_WISP_HTTP = "https://wisp.mercurywork.shop/";
 
-// Patch JS bundles in assets/
+const deadDomains = [
+  "21baseballacademy.com",
+  "k12-nj2-portal.educationate.space",
+  "k12-nj1-portal.khanlearning.art",
+  "k12-na-east1-portal.johnsclasslearning.store",
+  "new-server.baylib.top"
+];
+
 const assetsDir = path.join(distDir, "assets");
 if (fs.existsSync(assetsDir)) {
   for (const file of fs.readdirSync(assetsDir)) {
-    if (file.endsWith(".js")) {
+    if (file.endsWith(".js") || file.endsWith(".json")) {
       const p = path.join(assetsDir, file);
-      let bundle = fs.readFileSync(p, "utf8");
-      bundle = bundle.replace(prefixRegex, `$1${fullScramPrefix}`);
-      fs.writeFileSync(p, bundle);
+      let content = fs.readFileSync(p, "utf8");
+
+      // Patch scram prefix
+      content = content.replace(prefixRegex, `$1${fullScramPrefix}`);
+
+      // Overwrite dead domains
+      for (const dead of deadDomains) {
+        content = content.split(`wss://${dead}/ws/`).join(TARGET_WISP_WS);
+        content = content.split(`wss://${dead}/ws`).join(TARGET_WISP_WS);
+        content = content.split(`wss://${dead}`).join(TARGET_WISP_WS);
+        content = content.split(`https://${dead}`).join(TARGET_WISP_HTTP);
+        content = content.split(dead).join("wisp.mercurywork.shop");
+      }
+
+      fs.writeFileSync(p, content);
     }
   }
 }
 
-// Patch scramjet runtime scripts
 const scramjetAll = path.join(distDir, "runtime", "scramjet", "scramjet.all.js");
 if (fs.existsSync(scramjetAll)) {
   let scramjetCode = fs.readFileSync(scramjetAll, "utf8");
@@ -68,7 +82,33 @@ if (fs.existsSync(scramjetAll)) {
   fs.writeFileSync(scramjetAll, scramjetCode);
 }
 
-// 4. Subdirectory template with pre-seeded public Wisp pool and automatic fallback
+// 5. Inject auth-stub into app.html so /api/auth/session never triggers CORS errors
+if (fs.existsSync(appShellHtml)) {
+  let htmlCode = fs.readFileSync(appShellHtml, "utf8");
+  htmlCode = htmlCode.replace(prefixRegex, `$1${fullScramPrefix}`);
+  
+  const authShim = `
+  <script>
+    (function() {
+      const origFetch = window.fetch;
+      window.fetch = async function(...args) {
+        const url = typeof args[0] === "string" ? args[0] : (args[0] && args[0].url) || "";
+        if (url.includes("/api/auth/session")) {
+          return new Response(JSON.stringify({ user: null, authenticated: false }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return origFetch.apply(this, args);
+      };
+    })();
+  </script>`;
+  
+  htmlCode = htmlCode.replace(/<head([^>]*)>/i, `<head$1>\n${authShim}`);
+  fs.writeFileSync(appShellHtml, htmlCode);
+}
+
+// 6. Subdirectory wrapper template
 const pageTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -80,58 +120,13 @@ const pageTemplate = `<!DOCTYPE html>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
     iframe { width: 100%; height: 100%; border: none; display: block; }
   </style>
-  <script>
-    (function() {
-      // List of public Wisp endpoints for testing and failover
-      const WISP_SERVERS = [
-        "wss://wisp.mercurywork.shop/",
-        "wss://ruby.rubynetwork.co/wisp/",
-        "wss://flow-works.me/wisp/",
-        "wss://edu.flaming.codes/wisp/"
-      ];
-
-      // Seed common storage keys used by Bare-Mux frontends
-      const fallbackUrl = WISP_SERVERS[0];
-      try {
-        if (!localStorage.getItem("wisp-server")) {
-          localStorage.setItem("wisp-server", fallbackUrl);
-        }
-        if (!localStorage.getItem("bare-server")) {
-          localStorage.setItem("bare-server", fallbackUrl);
-        }
-        if (!localStorage.getItem("baremux-transport")) {
-          localStorage.setItem("baremux-transport", "epoxy");
-        }
-      } catch (err) {}
-
-      // Fast check to find an online Wisp server
-      async function testAndSelectWisp() {
-        for (const url of WISP_SERVERS) {
-          try {
-            const works = await new Promise((resolve) => {
-              const ws = new WebSocket(url);
-              const timer = setTimeout(() => { ws.close(); resolve(false); }, 1500);
-              ws.onopen = () => { clearTimeout(timer); ws.close(); resolve(true); };
-              ws.onerror = () => { clearTimeout(timer); resolve(false); };
-            });
-            if (works) {
-              localStorage.setItem("wisp-server", url);
-              localStorage.setItem("bare-server", url);
-              break;
-            }
-          } catch (e) {}
-        }
-      }
-      testAndSelectWisp();
-    })();
-  </script>
 </head>
 <body>
   <iframe src="${repoPrefix}app.html" allow="fullscreen; clipboard-read; clipboard-write"></iframe>
 </body>
 </html>`;
 
-// 5. Generate unique nested paths
+// 7. Generate 5,000 subfolders
 const TOTAL_PAGES = 5000;
 const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -156,7 +151,6 @@ while (uniquePaths.size < TOTAL_PAGES) {
 
 let masterLinksHtml = "";
 
-// 6. Write lightweight wrapper index.html files into each generated directory
 for (const nestedPath of uniquePaths) {
   const folderPath = path.join(distDir, nestedPath);
   fs.mkdirSync(folderPath, { recursive: true });
@@ -164,7 +158,7 @@ for (const nestedPath of uniquePaths) {
   masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
 }
 
-// 7. Directory index page
+// 8. Main directory index dashboard
 const masterIndexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -216,4 +210,4 @@ const masterIndexHtml = `<!DOCTYPE html>
 </html>`;
 
 fs.writeFileSync(path.join(distDir, "index.html"), masterIndexHtml);
-console.log("Build completed successfully.");
+console.log("Build and domain patch completed successfully.");
