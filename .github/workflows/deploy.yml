@@ -1,14 +1,10 @@
-name: Duplicate Template Deployer
+name: Deploy 5k Shell Pages
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
-
-concurrency:
-  group: deploy-pages
-  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -20,50 +16,152 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      - name: Install and Setup Git LFS
+      - name: Fetch Upstream and Generate 5k Shells
         run: |
-          git lfs install
+          node -e '
+          const fs = require("fs");
+          const path = require("path");
+          const { execSync } = require("child_process");
 
-      - name: Run Build Script
-        run: node build.js
+          const distDir = path.join(process.cwd(), "dist");
+          if (fs.existsSync(distDir)) fs.rmSync(distDir, { recursive: true, force: true });
+          fs.mkdirSync(distDir, { recursive: true });
+          fs.writeFileSync(path.join(distDir, ".nojekyll"), "");
 
-      - name: Deploy to gh-pages with Git LFS
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd dist_deploy
+          const repoName = process.env.GITHUB_REPOSITORY
+            ? process.env.GITHUB_REPOSITORY.split("/")[1]
+            : "5k-links-10-8-2026-v4";
+          const repoPrefix = `/${repoName}/`;
 
-          # Initialize a clean git repo inside the build directory
-          git init
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          // 1. Download and extract scientific-studying/svg@main directly into dist
+          console.log("Extracting upstream application...");
+          const tarPath = path.join(process.cwd(), "temp.tar.gz");
+          execSync(`curl -sL "https://codeload.github.com/scientific-studying/svg/tar.gz/refs/heads/main" -o "${tarPath}"`);
+          execSync(`tar -xzf "${tarPath}" -C "${distDir}" --strip-components=1`);
+          fs.rmSync(tarPath, { force: true });
 
-          # Re-apply LFS tracking rules for the deploy commit
-          git lfs install
-          git lfs track "books/html/fnafi/**"
-          git lfs track "books/html/fnafi3/**"
-          git lfs track "*.zip"
-          git lfs track "*.wasm"
-          git add .gitattributes
+          // 2. Rename the root index.html to app.html so it serves the full React app
+          const origHtml = path.join(distDir, "index.html");
+          const appShellHtml = path.join(distDir, "app.html");
+          if (fs.existsSync(origHtml)) {
+            fs.renameSync(origHtml, appShellHtml);
+          }
 
-          # Stage files and commit
-          git add -A
-          git commit -m "Deploy 5,000 links with custom logo.svg and Git LFS"
+          // 3. Template for the 5,000 subfolders
+          // The wrapper renders full-screen and delegates execution to app.html at root
+          const pageTemplate = `<!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>App</title>
+            <link rel="icon" type="image/png" href="${repoPrefix}branding/lucide.png">
+            <style>
+              html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+              iframe { width: 100%; height: 100%; border: none; display: block; }
+            </style>
+          </head>
+          <body>
+            <iframe src="${repoPrefix}app.html" allow="fullscreen; clipboard-read; clipboard-write"></iframe>
+          </body>
+          </html>`;
 
-          # Add remote authentication
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          // 4. Generate random nested paths
+          const TOTAL_PAGES = 5000;
+          const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
-          # Clear ref conflicts and push LFS blobs
-          git fetch origin gh-pages || true
-          git lfs push origin HEAD --all
+          function getRandomSegment(minLen = 4, maxLen = 10) {
+            const length = Math.floor(Math.random() * (maxLen - minLen + 1)) + minLen;
+            let segment = "";
+            for (let i = 0; i < length; i++) segment += chars.charAt(Math.floor(Math.random() * chars.length));
+            return segment;
+          }
 
-          # Force-push to gh-pages
-          git push origin +HEAD:refs/heads/gh-pages
+          function getNestedPath(minSegments = 2, maxSegments = 4) {
+            const depth = Math.floor(Math.random() * (maxSegments - minSegments + 1)) + minSegments;
+            const segments = [];
+            for (let i = 0; i < depth; i++) segments.push(getRandomSegment(4, 10));
+            return segments.join("/");
+          }
+
+          const uniquePaths = new Set();
+          while (uniquePaths.size < TOTAL_PAGES) {
+            uniquePaths.add(getNestedPath(2, 4));
+          }
+
+          let masterLinksHtml = "";
+
+          // 5. Write lightweight wrapper index.html into each subfolder
+          for (const nestedPath of uniquePaths) {
+            const folderPath = path.join(distDir, nestedPath);
+            fs.mkdirSync(folderPath, { recursive: true });
+            fs.writeFileSync(path.join(folderPath, "index.html"), pageTemplate);
+            masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
+          }
+
+          // 6. Root Directory Index Dashboard
+          const masterIndexHtml = `<!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Directory Index</title>
+            <link rel="icon" type="image/png" href="${repoPrefix}branding/lucide.png">
+            <style>
+              * { box-sizing: border-box; margin: 0; padding: 0; }
+              body {
+                background: #0d1117; color: #c9d1d9;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                padding: 40px 20px; display: flex; flex-direction: column; align-items: center;
+              }
+              header { text-align: center; margin-bottom: 28px; max-width: 650px; width: 100%; }
+              h1 { font-size: 28px; font-weight: 700; color: #f0f6fc; margin-bottom: 8px; }
+              p { color: #8b949e; font-size: 14px; margin-bottom: 20px; }
+              .search-box {
+                width: 100%; padding: 12px 18px; border-radius: 8px; border: 1px solid #30363d;
+                background: #161b22; color: #f0f6fc; font-size: 15px; outline: none;
+              }
+              .search-box:focus { border-color: #58a6ff; box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2); }
+              .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; width: 100%; max-width: 1300px; }
+              .card {
+                display: flex; align-items: center; justify-content: center; background: #161b22;
+                border: 1px solid #30363d; border-radius: 6px; padding: 12px; color: #58a6ff;
+                text-decoration: none; font-size: 12px; font-family: monospace; word-break: break-all; text-align: center;
+              }
+              .card:hover { background: #21262d; border-color: #58a6ff; color: #79c0ff; transform: translateY(-2px); }
+              .hidden { display: none !important; }
+            </style>
+          </head>
+          <body>
+            <header>
+              <h1>Directory Index</h1>
+              <p>5,000 Nested Endpoints</p>
+              <input type="text" id="filter" class="search-box" placeholder="Quick find path..." autocomplete="off" />
+            </header>
+            <main class="grid" id="link-grid">${masterLinksHtml}</main>
+            <script>
+              const filter = document.getElementById("filter");
+              const links = document.querySelectorAll(".card");
+              filter.addEventListener("input", (e) => {
+                const term = e.target.value.toLowerCase().trim();
+                links.forEach(card => card.classList.toggle("hidden", !card.textContent.toLowerCase().includes(term)));
+              });
+            </script>
+          </body>
+          </html>`;
+
+          fs.writeFileSync(path.join(distDir, "index.html"), masterIndexHtml);
+          console.log("Successfully generated wrapper shells.");
+          '
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
