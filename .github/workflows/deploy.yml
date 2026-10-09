@@ -1,0 +1,69 @@
+name: Duplicate Template Deployer
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-pages
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install and Setup Git LFS
+        run: |
+          git lfs install
+
+      - name: Run Build Script
+        run: node build.js
+
+      - name: Deploy to gh-pages with Git LFS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist_deploy
+
+          # Initialize a clean git repo inside the build directory
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Re-apply LFS tracking rules for the deploy commit
+          git lfs install
+          git lfs track "books/html/fnafi/**"
+          git lfs track "books/html/fnafi3/**"
+          git lfs track "*.zip"
+          git lfs track "*.wasm"
+          git add .gitattributes
+
+          # Stage files and commit
+          git add -A
+          git commit -m "Deploy 5,000 links with custom logo.svg and Git LFS"
+
+          # Add remote authentication
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # Clear ref conflicts and push LFS blobs
+          git fetch origin gh-pages || true
+          git lfs push origin HEAD --all
+
+          # Force-push to gh-pages
+          git push origin +HEAD:refs/heads/gh-pages
