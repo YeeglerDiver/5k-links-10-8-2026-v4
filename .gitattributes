@@ -1,0 +1,7 @@
+books/html/fnafi/* filter=lfs diff=lfs merge=lfs -text
+books/html/fnafi3/* filter=lfs diff=lfs merge=lfs -text
+*.zip filter=lfs diff=lfs merge=lfs -text
+*.wasm filter=lfs diff=lfs merge=lfs -text
+*.wasm.wasm filter=lfs diff=lfs merge=lfs -text
+books/html/fnafi/** filter=lfs diff=lfs merge=lfs -text
+books/html/fnafi3/** filter=lfs diff=lfs merge=lfs -text
