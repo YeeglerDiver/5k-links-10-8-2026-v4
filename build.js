@@ -15,7 +15,6 @@ const repoName = process.env.GITHUB_REPOSITORY
   : "5k-links-10-8-2026-v2";
 const repoPrefix = `/${repoName}/`;
 
-// Helper to download remote files with redirect handling
 function downloadBuffer(url) {
   return new Promise((resolve, reject) => {
     https.get(url, { headers: { "User-Agent": "Node-Build-Script" } }, (res) => {
@@ -32,14 +31,13 @@ function downloadBuffer(url) {
   });
 }
 
-// Flat copy of all nested files to target root
-function copyAllFilesToRoot(srcDir, targetDir) {
+function copyAllFilesToTarget(srcDir, targetDir) {
   if (!fs.existsSync(srcDir)) return;
   for (const item of fs.readdirSync(srcDir)) {
     const fullSrc = path.join(srcDir, item);
     const stat = fs.statSync(fullSrc);
     if (stat.isDirectory()) {
-      copyAllFilesToRoot(fullSrc, targetDir);
+      copyAllFilesToTarget(fullSrc, targetDir);
     } else {
       const fullDest = path.join(targetDir, item);
       if (!fs.existsSync(fullDest)) {
@@ -94,23 +92,39 @@ async function runBuild() {
     }
   }
 
-  // 3. Mirror all assets to root for flat lookups
-  copyAllFilesToRoot(path.join(extractDir, "assets"), distDir);
-  copyAllFilesToRoot(path.join(extractDir, "runtime"), distDir);
-  copyAllFilesToRoot(path.join(extractDir, "branding"), distDir);
+  // 3. Fix Scramjet double WASM extension bug
+  const scramjetDir = path.join(distDir, "runtime", "scramjet");
+  if (fs.existsSync(scramjetDir)) {
+    const wasmFile = path.join(scramjetDir, "scramjet.wasm");
+    const doubleWasmFile = path.join(scramjetDir, "scramjet.wasm.wasm");
+    if (fs.existsSync(wasmFile) && !fs.existsSync(doubleWasmFile)) {
+      fs.copyFileSync(wasmFile, doubleWasmFile);
+    }
+  }
+
+  // 4. Mirror all assets to root for flat lookups
+  copyAllFilesToTarget(path.join(extractDir, "assets"), distDir);
+  copyAllFilesToTarget(path.join(extractDir, "runtime"), distDir);
+  copyAllFilesToTarget(path.join(extractDir, "branding"), distDir);
+
+  // Mirror baremux/index.js to distDir/index.js if Bare-Mux looks at root
+  const baremuxIndex = path.join(extractDir, "runtime", "baremux", "index.js");
+  if (fs.existsSync(baremuxIndex) && !fs.existsSync(path.join(distDir, "index.js"))) {
+    fs.copyFileSync(baremuxIndex, path.join(distDir, "index.js"));
+  }
 
   // Preserve local repo assets
   const localDirs = ["books", "dist"];
   for (const d of localDirs) {
     if (fs.existsSync(d)) {
       fs.cpSync(d, path.join(distDir, d), { recursive: true });
-      copyAllFilesToRoot(path.join(process.cwd(), d), distDir);
+      copyAllFilesToTarget(path.join(process.cwd(), d), distDir);
     }
   }
 
   fs.rmSync(tarPath, { force: true });
 
-  // 4. Patch root-relative URLs in all JS, JSON, and HTML bundles
+  // 5. Patch root-relative URLs in files
   function patchPathsInDirectory(dir) {
     for (const item of fs.readdirSync(dir)) {
       const fullPath = path.join(dir, item);
@@ -133,27 +147,69 @@ async function runBuild() {
       }
     }
   }
-
   patchPathsInDirectory(distDir);
 
-  // 5. Build base application template from index.html
+  // 6. Build base application template from index.html with CORS/Fetch interceptor
   const rawHtmlPath = path.join(extractDir, "index.html");
   let appHtml = fs.existsSync(rawHtmlPath)
     ? fs.readFileSync(rawHtmlPath, "utf8")
     : fs.readFileSync("index.html", "utf8");
 
-  // Remap standard root attributes
   appHtml = appHtml
     .replace(/(href|src)=["']\/(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`)
     .replace(/url\(['"]?\/([^'")]+)['"]?\)/gi, `url("${repoPrefix}$1")`);
 
+  // Interceptor script to catch failing auth/session calls and prevent infinite crash loops
+  const mockInterceptor = `
+  <base href="${repoPrefix}">
+  <script>
+    (function() {
+      const originalFetch = window.fetch;
+      window.fetch = async function(...args) {
+        const url = args[0] ? args[0].toString() : "";
+        if (url.includes("/api/auth/session")) {
+          return new Response(JSON.stringify({ user: null, authenticated: false }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        try {
+          return await originalFetch.apply(this, args);
+        } catch (err) {
+          if (url.includes("/api/") || url.includes("/ws/")) {
+            return new Response(JSON.stringify({ error: "offline" }), {
+              status: 503,
+              headers: { "Content-Type": "application/json" }
+            });
+          }
+          throw err;
+        }
+      };
+    })();
+  </script>`;
+
   if (!appHtml.includes("<base ")) {
-    appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n    <base href="${repoPrefix}">`);
+    appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${mockInterceptor}`);
   }
 
   fs.rmSync(extractDir, { recursive: true, force: true });
 
-  // 6. Generate 5,000 subdirectories
+  // 7. Collect essential runtime files to link directly in each subfolder
+  const criticalFiles = [];
+  const candidateFiles = [
+    "index.js",
+    "scramjet.all.js",
+    "scramjet.wasm",
+    "scramjet.wasm.wasm",
+    "sw.js"
+  ];
+  for (const c of candidateFiles) {
+    if (fs.existsSync(path.join(distDir, c))) {
+      criticalFiles.push(c);
+    }
+  }
+
+  // 8. Generate 5,000 subdirectories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -183,10 +239,16 @@ async function runBuild() {
     fs.mkdirSync(folderPath, { recursive: true });
 
     fs.writeFileSync(path.join(folderPath, "index.html"), appHtml);
+
+    // Copy critical local runtime fallbacks directly into the folder
+    for (const f of criticalFiles) {
+      fs.copyFileSync(path.join(distDir, f), path.join(folderPath, f));
+    }
+
     masterLinksHtml += `<a class="card" href="./${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 7. Site Index
+  // 9. Site Index
   const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -237,7 +299,7 @@ async function runBuild() {
 </html>`;
 
   fs.writeFileSync(path.join(distDir, "index.html"), indexHtml);
-  console.log("Successfully rebuilt bundles with patched runtime paths.");
+  console.log("Build complete with patched WASM references and mocked auth routes.");
 }
 
 runBuild();
