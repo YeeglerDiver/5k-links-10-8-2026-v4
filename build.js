@@ -15,7 +15,7 @@ const repoName = process.env.GITHUB_REPOSITORY
   : "5k-links-10-8-2026-v2";
 const repoPrefix = `/${repoName}/`;
 
-// Helper to download files following redirects
+// Helper to download remote files with redirect handling
 function downloadBuffer(url) {
   return new Promise((resolve, reject) => {
     https.get(url, { headers: { "User-Agent": "Node-Build-Script" } }, (res) => {
@@ -32,10 +32,26 @@ function downloadBuffer(url) {
   });
 }
 
+// Recursively copy all files found within a source directory directly to a target directory flat
+function copyAllFilesToRoot(srcDir, targetDir) {
+  if (!fs.existsSync(srcDir)) return;
+  for (const item of fs.readdirSync(srcDir)) {
+    const fullSrc = path.join(srcDir, item);
+    const stat = fs.statSync(fullSrc);
+    if (stat.isDirectory()) {
+      copyAllFilesToRoot(fullSrc, targetDir);
+    } else {
+      const fullDest = path.join(targetDir, item);
+      if (!fs.existsSync(fullDest)) {
+        fs.copyFileSync(fullSrc, fullDest);
+      }
+    }
+  }
+}
+
 async function runBuild() {
   console.log("Downloading full scientific-studying/svg@main repository package...");
-  
-  // 1. Fetch tarball of the entire remote repository
+
   const repoTarUrl = "https://codeload.github.com/scientific-studying/svg/tar.gz/refs/heads/main";
   const tarPath = path.join(process.cwd(), "temp_svg.tar.gz");
   const extractDir = path.join(process.cwd(), "temp_svg_extracted");
@@ -50,13 +66,13 @@ async function runBuild() {
     fs.mkdirSync(extractDir, { recursive: true });
 
     execSync(`tar -xzf "${tarPath}" -C "${extractDir}" --strip-components=1`);
-    console.log("Repository extracted successfully.");
+    console.log("Remote source extracted.");
   } catch (err) {
     console.error("Failed to download or extract source repository:", err.message);
     process.exit(1);
   }
 
-  // 2. Git LFS attributes for deployment
+  // 1. Git LFS rules for deployment
   const gitattributesContent = [
     "books/html/fnafi/* filter=lfs diff=lfs merge=lfs -text",
     "books/html/fnafi3/* filter=lfs diff=lfs merge=lfs -text",
@@ -66,7 +82,7 @@ async function runBuild() {
   ].join("\n");
   fs.writeFileSync(path.join(distDir, ".gitattributes"), gitattributesContent);
 
-  // 3. Copy extracted remote source assets directly into dist_deploy
+  // 2. Copy remote repo structure directly
   const remoteItems = fs.readdirSync(extractDir);
   for (const item of remoteItems) {
     const src = path.join(extractDir, item);
@@ -78,39 +94,39 @@ async function runBuild() {
     }
   }
 
-  // Also preserve your local games and books assets if present
+  // 3. Mirror all assets directly into the root of dist_deploy
+  copyAllFilesToRoot(path.join(extractDir, "assets"), distDir);
+  copyAllFilesToRoot(path.join(extractDir, "runtime"), distDir);
+  copyAllFilesToRoot(path.join(extractDir, "branding"), distDir);
+
+  // Also preserve local books or dist folders if present in the main repo
   const localDirs = ["books", "dist"];
   for (const d of localDirs) {
     if (fs.existsSync(d)) {
       fs.cpSync(d, path.join(distDir, d), { recursive: true });
+      copyAllFilesToRoot(path.join(process.cwd(), d), distDir);
     }
   }
 
-  // Clean up downloaded archive
+  // Clean temporary archives
   fs.rmSync(tarPath, { force: true });
+
+  // 4. Prepare application HTML template using the upstream index.html
+  const rawHtmlPath = path.join(extractDir, "index.html");
+  let appHtml = fs.existsSync(rawHtmlPath)
+    ? fs.readFileSync(rawHtmlPath, "utf8")
+    : fs.readFileSync("index.html", "utf8");
+
+  // Fix hardcoded slash paths to respect repository prefix
+  appHtml = appHtml.replace(/(href|src)=["']\/(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`);
+
+  if (!appHtml.includes("<base ")) {
+    appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n    <base href="${repoPrefix}">`);
+  }
+
   fs.rmSync(extractDir, { recursive: true, force: true });
 
-  // 4. Create an HTML runner wrapper that launches logo.svg with the hash route
-  const targetSvgContent = fs.readFileSync(path.join(distDir, "logo.svg"), "utf8");
-
-  const htmlWrapper = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <base href="${repoPrefix}">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>App</title>
-  <style>
-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
-    object, embed, iframe { width: 100%; height: 100%; border: none; display: block; }
-  </style>
-</head>
-<body>
-  <object data="${repoPrefix}logo.svg#/" type="image/svg+xml"></object>
-</body>
-</html>`;
-
-  // 5. Generate 5,000 unique nested directories
+  // 5. Generate 5,000 physical nested directories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -139,14 +155,13 @@ async function runBuild() {
     const folderPath = path.join(distDir, nestedPath);
     fs.mkdirSync(folderPath, { recursive: true });
 
-    // Place the wrapper and raw logo.svg inside each folder
-    fs.writeFileSync(path.join(folderPath, "index.html"), htmlWrapper);
-    fs.writeFileSync(path.join(folderPath, "logo.svg"), targetSvgContent);
+    // Place the app entry inside each subpath
+    fs.writeFileSync(path.join(folderPath, "index.html"), appHtml);
 
     masterLinksHtml += `<a class="card" href="./${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 6. Root Directory Dashboard Index
+  // 6. Directory index dashboard at the site root
   const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -197,7 +212,7 @@ async function runBuild() {
 </html>`;
 
   fs.writeFileSync(path.join(distDir, "index.html"), indexHtml);
-  console.log("Full package bundled and 5,000 links created successfully.");
+  console.log("Successfully built 5,000 pages and copied all asset files to the root level.");
 }
 
 runBuild();
