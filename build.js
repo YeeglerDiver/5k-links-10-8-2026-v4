@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const { execSync } = require("child_process");
 
 const distDir = path.join(process.cwd(), "dist_deploy");
 if (fs.existsSync(distDir)) {
@@ -14,37 +15,48 @@ const repoName = process.env.GITHUB_REPOSITORY
   : "5k-links-10-8-2026-v2";
 const repoPrefix = `/${repoName}/`;
 
-// Helper to download remote files with redirect handling
-function downloadFile(url) {
+// Helper to download files following redirects
+function downloadBuffer(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+    https.get(url, { headers: { "User-Agent": "Node-Build-Script" } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return downloadFile(res.headers.location).then(resolve).catch(reject);
+        return downloadBuffer(res.headers.location).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) {
         return reject(new Error(`Failed to fetch ${url}, status: ${res.statusCode}`));
       }
-      let data = "";
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => resolve(data));
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
     }).on("error", reject);
   });
 }
 
 async function runBuild() {
-  // 1. Download target logo.svg (sanitized without URL fragments)
-  const downloadUrl = "https://cdn.jsdelivr.net/gh/scientific-studying/svg@main/logo.svg";
-  console.log(`Downloading target SVG from: ${downloadUrl}`);
+  console.log("Downloading full scientific-studying/svg@main repository package...");
+  
+  // 1. Fetch tarball of the entire remote repository
+  const repoTarUrl = "https://codeload.github.com/scientific-studying/svg/tar.gz/refs/heads/main";
+  const tarPath = path.join(process.cwd(), "temp_svg.tar.gz");
+  const extractDir = path.join(process.cwd(), "temp_svg_extracted");
 
-  let targetSvgContent;
   try {
-    targetSvgContent = await downloadFile(downloadUrl);
+    const tarBuffer = await downloadBuffer(repoTarUrl);
+    fs.writeFileSync(tarPath, tarBuffer);
+
+    if (fs.existsSync(extractDir)) {
+      fs.rmSync(extractDir, { recursive: true, force: true });
+    }
+    fs.mkdirSync(extractDir, { recursive: true });
+
+    execSync(`tar -xzf "${tarPath}" -C "${extractDir}" --strip-components=1`);
+    console.log("Repository extracted successfully.");
   } catch (err) {
-    console.error("Error downloading logo.svg:", err.message);
+    console.error("Failed to download or extract source repository:", err.message);
     process.exit(1);
   }
 
-  // 2. Git LFS attributes for deployment bundle
+  // 2. Git LFS attributes for deployment
   const gitattributesContent = [
     "books/html/fnafi/* filter=lfs diff=lfs merge=lfs -text",
     "books/html/fnafi3/* filter=lfs diff=lfs merge=lfs -text",
@@ -54,46 +66,33 @@ async function runBuild() {
   ].join("\n");
   fs.writeFileSync(path.join(distDir, ".gitattributes"), gitattributesContent);
 
-  // 3. Copy asset directories
-  const assetDirs = [
-    "__rv",
-    "books",
-    "data",
-    "dist",
-    "help",
-    "icons",
-    "linux",
-    "os",
-    "reviews",
-    "status",
-    "wallpapers"
-  ];
-
-  for (const dir of assetDirs) {
-    if (fs.existsSync(dir)) {
-      fs.cpSync(dir, path.join(distDir, dir), { recursive: true });
+  // 3. Copy extracted remote source assets directly into dist_deploy
+  const remoteItems = fs.readdirSync(extractDir);
+  for (const item of remoteItems) {
+    const src = path.join(extractDir, item);
+    const dest = path.join(distDir, item);
+    if (fs.statSync(src).isDirectory()) {
+      fs.cpSync(src, dest, { recursive: true });
+    } else {
+      fs.copyFileSync(src, dest);
     }
   }
 
-  // 4. Copy root files and mirror JS/CSS assets into dist/
-  for (const item of fs.readdirSync(process.cwd())) {
-    const full = path.join(process.cwd(), item);
-    if (fs.statSync(full).isFile() && !item.startsWith(".") && item !== "build.js") {
-      fs.copyFileSync(full, path.join(distDir, item));
+  // Also preserve your local games and books assets if present
+  const localDirs = ["books", "dist"];
+  for (const d of localDirs) {
+    if (fs.existsSync(d)) {
+      fs.cpSync(d, path.join(distDir, d), { recursive: true });
     }
   }
 
-  fs.mkdirSync(path.join(distDir, "dist"), { recursive: true });
-  for (const item of fs.readdirSync(distDir)) {
-    if (item.endsWith(".js") || item.endsWith(".css")) {
-      fs.copyFileSync(path.join(distDir, item), path.join(distDir, "dist", item));
-    }
-  }
+  // Clean up downloaded archive
+  fs.rmSync(tarPath, { force: true });
+  fs.rmSync(extractDir, { recursive: true, force: true });
 
-  // Save the SVG to root
-  fs.writeFileSync(path.join(distDir, "index.svg"), targetSvgContent);
+  // 4. Create an HTML runner wrapper that launches logo.svg with the hash route
+  const targetSvgContent = fs.readFileSync(path.join(distDir, "logo.svg"), "utf8");
 
-  // 5. HTML wrapper embedding the SVG with the hash router fragment
   const htmlWrapper = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -105,15 +104,13 @@ async function runBuild() {
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
     object, embed, iframe { width: 100%; height: 100%; border: none; display: block; }
   </style>
-  <script src="build-info.js"></script>
-  <script src="achroma.js"></script>
 </head>
 <body>
-  <object data="${repoPrefix}index.svg#/" type="image/svg+xml"></object>
+  <object data="${repoPrefix}logo.svg#/" type="image/svg+xml"></object>
 </body>
 </html>`;
 
-  // 6. Generate 5,000 unique nested directories
+  // 5. Generate 5,000 unique nested directories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -142,14 +139,14 @@ async function runBuild() {
     const folderPath = path.join(distDir, nestedPath);
     fs.mkdirSync(folderPath, { recursive: true });
 
-    // Place the wrapper and raw SVG inside each folder
+    // Place the wrapper and raw logo.svg inside each folder
     fs.writeFileSync(path.join(folderPath, "index.html"), htmlWrapper);
-    fs.writeFileSync(path.join(folderPath, "index.svg"), targetSvgContent);
+    fs.writeFileSync(path.join(folderPath, "logo.svg"), targetSvgContent);
 
     masterLinksHtml += `<a class="card" href="./${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 7. Directory index dashboard at the repository root
+  // 6. Root Directory Dashboard Index
   const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -200,7 +197,7 @@ async function runBuild() {
 </html>`;
 
   fs.writeFileSync(path.join(distDir, "index.html"), indexHtml);
-  console.log("Build successfully completed!");
+  console.log("Full package bundled and 5,000 links created successfully.");
 }
 
 runBuild();
