@@ -28,7 +28,7 @@ const OPEN_TAB_INJECT_SCRIPT = `
     if(!href) return href;
     try{
       const current=new URL(href, window.location.href);
-      const marker='/scram/';
+      const marker='/5k-links-10-8-2026-v4/scram/';
       let candidate=current.href;
       for(let i=0;i<8;i+=1){
         const parsed=new URL(candidate, window.location.href);
