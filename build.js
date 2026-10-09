@@ -22,7 +22,7 @@ function downloadBuffer(url) {
         return downloadBuffer(res.headers.location).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) {
-        return reject(new Error(`Failed to fetch ${url}, status:${res.statusCode}`));
+        return reject(new Error(`Failed to fetch ${url}, status: ${res.statusCode}`));
       }
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
@@ -97,16 +97,17 @@ async function runBuild() {
   copyAllFilesToTarget(path.join(extractDir, "runtime"), distDir);
   copyAllFilesToTarget(path.join(extractDir, "branding"), distDir);
 
+  // Duplicate wasm to wasm.wasm to handle the engine requesting scramjet.wasm.wasm
   const scramjetDir = path.join(distDir, "runtime", "scramjet");
   if (fs.existsSync(scramjetDir)) {
     const wasmFile = path.join(scramjetDir, "scramjet.wasm");
     const doubleWasm = path.join(scramjetDir, "scramjet.wasm.wasm");
-    if (fs.existsSync(wasmFile) && !fs.existsSync(doubleWasm)) {
+    if (fs.existsSync(wasmFile)) {
       fs.copyFileSync(wasmFile, doubleWasm);
     }
   }
 
-  // 4. Patch absolute paths inside ALL JS, JSON, and HTML bundles
+  // 4. Deep search & replace strings across files
   function deepPatch(dir) {
     for (const item of fs.readdirSync(dir)) {
       const fullPath = path.join(dir, item);
@@ -119,7 +120,6 @@ async function runBuild() {
           .replace(/(['"`])\/runtime\//g, `$1${repoPrefix}runtime/`)
           .replace(/(['"`])\/branding\//g, `$1${repoPrefix}branding/`)
           .replace(/(['"`])\/assets\//g, `$1${repoPrefix}assets/`)
-          .replace(/(['"`])\/index\.html/g, `$1${repoPrefix}index.html`)
           .replace(/(['"`])\/sw\.js/g, `$1${repoPrefix}sw.js`);
 
         if (updated !== content) {
@@ -130,7 +130,7 @@ async function runBuild() {
   }
   deepPatch(distDir);
 
-  // 5. Construct application HTML template
+  // 5. Build base application template with dynamic fetch & worker redirection
   const rawHtmlPath = path.join(extractDir, "index.html");
   let appHtml = fs.existsSync(rawHtmlPath)
     ? fs.readFileSync(rawHtmlPath, "utf8")
@@ -140,23 +140,32 @@ async function runBuild() {
     .replace(/(href|src)=["']\/(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`)
     .replace(/url\(['"]?\/([^'")]+)['"]?\)/gi, `url("${repoPrefix}$1")`);
 
-  const mockInterceptor = `
+  // This injector catches window.fetch and Worker creations that target /runtime/ or apex domain
+  const runtimeInterceptor = `
   <base href="${repoPrefix}">
   <script>
     (function() {
+      const PREFIX = "${repoPrefix}";
+
+      // 1. Rewrite fetch requests
       const originalFetch = window.fetch;
       window.fetch = async function(...args) {
-        const url = args[0] ? args[0].toString() : "";
-        if (url.includes("/api/auth/session")) {
-          return new Response(JSON.stringify({ user: null, authenticated: false }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" }
-          });
+        if (typeof args[0] === "string") {
+          if (args[0].startsWith("/runtime/") || args[0].startsWith("/branding/") || args[0].startsWith("/assets/")) {
+            args[0] = PREFIX + args[0].replace(/^\\/+/, "");
+          } else if (args[0] === "/index.html") {
+            args[0] = PREFIX + "index.html";
+          } else if (args[0].includes("/api/auth/session")) {
+            return new Response(JSON.stringify({ user: null, authenticated: false }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" }
+            });
+          }
         }
         try {
           return await originalFetch.apply(this, args);
         } catch (err) {
-          if (url.includes("/api/") || url.includes("/ws/")) {
+          if (typeof args[0] === "string" && (args[0].includes("/api/") || args[0].includes("/ws/"))) {
             return new Response(JSON.stringify({ error: "offline" }), {
               status: 503,
               headers: { "Content-Type": "application/json" }
@@ -165,20 +174,27 @@ async function runBuild() {
           throw err;
         }
       };
+
+      // 2. Rewrite Web Worker constructor calls
+      const OriginalWorker = window.Worker;
+      window.Worker = function(scriptURL, options) {
+        let url = scriptURL.toString();
+        if (url.startsWith("/runtime/") || url.startsWith("/assets/")) {
+          url = PREFIX + url.replace(/^\\/+/, "");
+        }
+        return new OriginalWorker(url, options);
+      };
     })();
   </script>`;
 
   if (!appHtml.includes("<base ")) {
-    appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${mockInterceptor}`);
+    appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${runtimeInterceptor}`);
   }
-
-  // Set the app HTML as dist_deploy/index.html so GET /index.html resolves 200
-  fs.writeFileSync(path.join(distDir, "index.html"), appHtml);
 
   fs.rmSync(tarPath, { force: true });
   fs.rmSync(extractDir, { recursive: true, force: true });
 
-  // 6. Generate 5,000 unique subdirectories
+  // 6. Generate 5,000 unique directories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -207,12 +223,13 @@ async function runBuild() {
     const folderPath = path.join(distDir, nestedPath);
     fs.mkdirSync(folderPath, { recursive: true });
 
+    // Subpaths get the full app runner
     fs.writeFileSync(path.join(folderPath, "index.html"), appHtml);
     masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 7. Directory index available at /directory.html
-  const directoryHtml = `<!DOCTYPE html>
+  // 7. Site Index (The main landing page displays the 5,000 links directory)
+  const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -261,8 +278,8 @@ async function runBuild() {
 </body>
 </html>`;
 
-  fs.writeFileSync(path.join(distDir, "directory.html"), directoryHtml);
-  console.log("Build successfully completed.");
+  fs.writeFileSync(path.join(distDir, "index.html"), indexHtml);
+  console.log("Build successfully completed!");
 }
 
 runBuild();
