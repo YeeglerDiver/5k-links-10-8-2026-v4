@@ -48,7 +48,7 @@ function copyAllFilesToTarget(srcDir, targetDir) {
 }
 
 async function runBuild() {
-  console.log("Fetching upstream repository package...");
+  console.log("Downloading full upstream package...");
 
   const repoTarUrl = "https://codeload.github.com/scientific-studying/svg/tar.gz/refs/heads/main";
   const tarPath = path.join(process.cwd(), "temp_svg.tar.gz");
@@ -64,13 +64,13 @@ async function runBuild() {
     fs.mkdirSync(extractDir, { recursive: true });
 
     execSync(`tar -xzf "${tarPath}" -C "${extractDir}" --strip-components=1`);
-    console.log("Remote source extracted.");
+    console.log("Upstream source extracted.");
   } catch (err) {
     console.error("Failed to download or extract source repository:", err.message);
     process.exit(1);
   }
 
-  // 1. Git LFS attributes
+  // 1. Git LFS rules
   const gitattributesContent = [
     "books/html/fnafi/* filter=lfs diff=lfs merge=lfs -text",
     "books/html/fnafi3/* filter=lfs diff=lfs merge=lfs -text",
@@ -80,7 +80,7 @@ async function runBuild() {
   ].join("\n");
   fs.writeFileSync(path.join(distDir, ".gitattributes"), gitattributesContent);
 
-  // 2. Mirror remote directory tree
+  // 2. Mirror full remote directory tree to dist_deploy
   const remoteItems = fs.readdirSync(extractDir);
   for (const item of remoteItems) {
     const src = path.join(extractDir, item);
@@ -92,24 +92,28 @@ async function runBuild() {
     }
   }
 
-  // 3. Mirror all assets to root
+  // 3. Mirror all assets directly into root for top-level flat resolution
   copyAllFilesToTarget(path.join(extractDir, "assets"), distDir);
   copyAllFilesToTarget(path.join(extractDir, "runtime"), distDir);
   copyAllFilesToTarget(path.join(extractDir, "branding"), distDir);
 
-  // Handle baremux index.js
-  const baremuxIndex = path.join(extractDir, "runtime", "baremux", "index.js");
-  if (fs.existsSync(baremuxIndex)) {
-    fs.copyFileSync(baremuxIndex, path.join(distDir, "index.js"));
+  // Local books and dist preservation
+  const localDirs = ["books", "dist"];
+  for (const d of localDirs) {
+    if (fs.existsSync(d)) {
+      fs.cpSync(d, path.join(distDir, d), { recursive: true });
+      copyAllFilesToTarget(path.join(process.cwd(), d), distDir);
+    }
   }
 
-  // Handle scramjet.all.js
-  const scramjetAll = path.join(extractDir, "runtime", "scramjet", "scramjet.all.js");
-  if (fs.existsSync(scramjetAll)) {
-    fs.copyFileSync(scramjetAll, path.join(distDir, "scramjet.all.js"));
+  // 4. Handle worker.js, baremux index, and scramjet.wasm naming bugs
+  const baremuxDir = path.join(distDir, "runtime", "baremux");
+  if (fs.existsSync(baremuxDir)) {
+    for (const f of fs.readdirSync(baremuxDir)) {
+      fs.copyFileSync(path.join(baremuxDir, f), path.join(distDir, f));
+    }
   }
 
-  // Handle scramjet wasm and double-extension
   const scramjetDir = path.join(distDir, "runtime", "scramjet");
   if (fs.existsSync(scramjetDir)) {
     const wasmFile = path.join(scramjetDir, "scramjet.wasm");
@@ -119,36 +123,115 @@ async function runBuild() {
       fs.copyFileSync(wasmFile, path.join(distDir, "scramjet.wasm"));
       fs.copyFileSync(wasmFile, path.join(distDir, "scramjet.wasm.wasm"));
     }
+    const scramjetAll = path.join(scramjetDir, "scramjet.all.js");
+    if (fs.existsSync(scramjetAll)) {
+      fs.copyFileSync(scramjetAll, path.join(distDir, "scramjet.all.js"));
+    }
   }
 
-  // 4. Construct application HTML template
+  // 5. Ensure lucide.png exists in every standard path
+  let lucideBuf = null;
+  const lucideCandidates = [
+    path.join(distDir, "branding", "lucide.png"),
+    path.join(distDir, "assets", "lucide.png"),
+    path.join(distDir, "lucide.png")
+  ];
+  for (const c of lucideCandidates) {
+    if (fs.existsSync(c)) {
+      lucideBuf = fs.readFileSync(c);
+      break;
+    }
+  }
+  if (lucideBuf) {
+    fs.mkdirSync(path.join(distDir, "branding"), { recursive: true });
+    fs.writeFileSync(path.join(distDir, "lucide.png"), lucideBuf);
+    fs.writeFileSync(path.join(distDir, "branding", "lucide.png"), lucideBuf);
+  }
+
+  // 6. Patch sw.js to route root and relative lookups to the repo subpath
+  const swPath = path.join(distDir, "sw.js");
+  if (fs.existsSync(swPath)) {
+    let swContent = fs.readFileSync(swPath, "utf8");
+    const swHeader = `
+      const APP_PREFIX = "${repoPrefix}";
+      self.addEventListener("fetch", (event) => {
+        const reqUrl = new URL(event.request.url);
+        if (reqUrl.origin === location.origin) {
+          if (!reqUrl.pathname.startsWith(APP_PREFIX)) {
+            const remapped = new URL(APP_PREFIX + reqUrl.pathname.replace(/^\\/+/, "") + reqUrl.search, location.origin);
+            event.respondWith(fetch(remapped, event.request));
+            return;
+          }
+        }
+      }, { prepend: true });
+    `;
+    swContent = swHeader + "\n" + swContent;
+    fs.writeFileSync(swPath, swContent, "utf8");
+  }
+
+  // 7. Global deep string replacement for hardcoded paths across JS/JSON/CSS
+  function deepPatch(dir) {
+    for (const item of fs.readdirSync(dir)) {
+      const fullPath = path.join(dir, item);
+      const stat = fs.statSync(fullPath);
+      if (stat.isDirectory()) {
+        if (item !== ".git") deepPatch(fullPath);
+      } else if (/\.(html|js|json|webmanifest|css)$/i.test(item)) {
+        let content = fs.readFileSync(fullPath, "utf8");
+        const updated = content
+          .replace(/(['"`])\/runtime\//g, `$1${repoPrefix}runtime/`)
+          .replace(/(['"`])\/branding\//g, `$1${repoPrefix}branding/`)
+          .replace(/(['"`])\/assets\//g, `$1${repoPrefix}assets/`)
+          .replace(/(['"`])\/sw\.js/g, `$1${repoPrefix}sw.js`);
+
+        if (updated !== content) {
+          fs.writeFileSync(fullPath, updated, "utf8");
+        }
+      }
+    }
+  }
+  deepPatch(distDir);
+
+  // 8. Build the application HTML template with comprehensive network shims
   const rawHtmlPath = path.join(extractDir, "index.html");
   let appHtml = fs.existsSync(rawHtmlPath)
     ? fs.readFileSync(rawHtmlPath, "utf8")
     : fs.readFileSync("index.html", "utf8");
 
-  // Remove preloads that trigger un-prefixed requests
+  // Remove preloads causing un-prefixed GET triggers
   appHtml = appHtml.replace(/<link[^>]+rel=["']preload["'][^>]*>/gi, "");
 
-  // Rewrite remaining paths
+  // Update base path and attributes
   appHtml = appHtml
     .replace(/(href|src)=["']\/(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`)
     .replace(/url\(['"]?\/([^'")]+)['"]?\)/gi, `url("${repoPrefix}$1")`);
 
-  const runtimeInterceptor = `
+  const coreShims = `
   <base href="${repoPrefix}">
+  <link rel="icon" type="image/png" href="${repoPrefix}branding/lucide.png">
+  <link rel="shortcut icon" type="image/png" href="${repoPrefix}branding/lucide.png">
   <script>
     (function() {
-      const originalFetch = window.fetch;
+      const PREFIX = "${repoPrefix}";
+
+      // 1. Fetch routing & offline auth bypass
+      const origFetch = window.fetch;
       window.fetch = async function(...args) {
-        if (typeof args[0] === "string" && args[0].includes("/api/auth/session")) {
-          return new Response(JSON.stringify({ user: null, authenticated: false }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" }
-          });
+        if (typeof args[0] === "string") {
+          let u = args[0];
+          if (u.startsWith("/runtime/") || u.startsWith("/branding/") || u.startsWith("/assets/") || u.startsWith("/books/")) {
+            args[0] = PREFIX + u.replace(/^\\/+/, "");
+          } else if (u === "sw.js" || u === "/sw.js") {
+            args[0] = PREFIX + "sw.js";
+          } else if (u.includes("/api/auth/session")) {
+            return new Response(JSON.stringify({ user: null, authenticated: false }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" }
+            });
+          }
         }
         try {
-          return await originalFetch.apply(this, args);
+          return await origFetch.apply(this, args);
         } catch (err) {
           if (typeof args[0] === "string" && (args[0].includes("/api/") || args[0].includes("/ws/"))) {
             return new Response(JSON.stringify({ error: "offline" }), {
@@ -159,22 +242,43 @@ async function runBuild() {
           throw err;
         }
       };
+
+      // 2. WebWorker and SharedWorker path routing
+      const OrigWorker = window.Worker;
+      window.Worker = function(url, opts) {
+        let u = url.toString();
+        if (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js")) {
+          u = PREFIX + u.replace(/^\\/+/, "");
+        }
+        return new OrigWorker(u, opts);
+      };
+
+      if (window.SharedWorker) {
+        const OrigShared = window.SharedWorker;
+        window.SharedWorker = function(url, opts) {
+          let u = url.toString();
+          if (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js")) {
+            u = PREFIX + u.replace(/^\\/+/, "");
+          }
+          return new OrigShared(u, opts);
+        };
+      }
     })();
   </script>`;
 
   if (!appHtml.includes("<base ")) {
-    appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${runtimeInterceptor}`);
+    appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${coreShims}`);
   }
 
-  // 5. Setup SPA 404 Fallback
+  // 9. SPA 404 Fallback
   const spaFallback = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <script>
-    const path = window.location.pathname;
-    if (!path.startsWith("${repoPrefix}")) {
-      window.location.replace("${repoPrefix}" + path.replace(/^\\/+/, "") + window.location.search + window.location.hash);
+    const p = window.location.pathname;
+    if (!p.startsWith("${repoPrefix}")) {
+      window.location.replace("${repoPrefix}" + p.replace(/^\\/+/, "") + window.location.search + window.location.hash);
     } else {
       window.location.replace("${repoPrefix}");
     }
@@ -187,24 +291,25 @@ async function runBuild() {
   fs.rmSync(tarPath, { force: true });
   fs.rmSync(extractDir, { recursive: true, force: true });
 
-  // 6. Collect critical runtime assets that subpaths request locally
-  const filesToMirrorLocally = [
-    "index.js",
+  // 10. Identify small local files needed inside each subfolder
+  const localCopies = [
+    "sw.js",
+    "worker.js",
     "scramjet.all.js",
     "scramjet.wasm",
     "scramjet.wasm.wasm",
-    "sw.js"
+    "index.js",
+    "lucide.png"
   ];
-
-  const availableFiles = {};
-  for (const f of filesToMirrorLocally) {
-    const fullPath = path.join(distDir, f);
-    if (fs.existsSync(fullPath)) {
-      availableFiles[f] = fs.readFileSync(fullPath);
+  const fileBuffers = {};
+  for (const name of localCopies) {
+    const p = path.join(distDir, name);
+    if (fs.existsSync(p)) {
+      fileBuffers[name] = fs.readFileSync(p);
     }
   }
 
-  // 7. Generate 5,000 subdirectories
+  // 11. Generate 5,000 subdirectories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -233,24 +338,30 @@ async function runBuild() {
     const folderPath = path.join(distDir, nestedPath);
     fs.mkdirSync(folderPath, { recursive: true });
 
-    // HTML entry
+    // Deploy app shell
     fs.writeFileSync(path.join(folderPath, "index.html"), appHtml);
 
-    // Place the four runtime scripts directly in the folder so relative requests succeed
-    for (const [name, buf] of Object.entries(availableFiles)) {
-      fs.writeFileSync(path.join(folderPath, name), buf);
+    // Place the essential local runtime files in each subfolder
+    for (const [fname, buf] of Object.entries(fileBuffers)) {
+      fs.writeFileSync(path.join(folderPath, fname), buf);
+    }
+
+    if (lucideBuf) {
+      fs.mkdirSync(path.join(folderPath, "branding"), { recursive: true });
+      fs.writeFileSync(path.join(folderPath, "branding", "lucide.png"), lucideBuf);
     }
 
     masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 8. Site Index Dashboard
+  // 12. Main Landing Directory Index
   const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Directory Index</title>
+  <link rel="icon" type="image/png" href="${repoPrefix}branding/lucide.png">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -295,7 +406,7 @@ async function runBuild() {
 </html>`;
 
   fs.writeFileSync(path.join(distDir, "index.html"), indexHtml);
-  console.log("Build successfully completed with local worker mirror support.");
+  console.log("All systems patched and built successfully.");
 }
 
 runBuild();
