@@ -52,7 +52,7 @@ function runBuild() {
     copyRecursive(path.join(process.cwd(), item), path.join(distDir, item));
   }
 
-  // 2. Mirror all assets directly into root for flat fallback lookups
+  // 2. Mirror assets directly into root for flat fallback lookups
   copyFlatFiles(path.join(distDir, "assets"), distDir);
   copyFlatFiles(path.join(distDir, "runtime"), distDir);
   copyFlatFiles(path.join(distDir, "branding"), distDir);
@@ -90,7 +90,7 @@ function runBuild() {
     fs.writeFileSync(path.join(distDir, "assets", "lucide.png"), buf);
   }
 
-  // 6. Patch sw.js so it does not intercept static worker.js requests
+  // 6. Patch sw.js to prevent duplicate prefixing
   const swPath = path.join(distDir, "sw.js");
   if (fs.existsSync(swPath)) {
     let content = fs.readFileSync(swPath, "utf8");
@@ -103,7 +103,8 @@ function runBuild() {
         }
         if (reqUrl.origin === location.origin) {
           if (!reqUrl.pathname.startsWith(APP_PREFIX)) {
-            const remapped = new URL(APP_PREFIX + reqUrl.pathname.replace(/^\\/+/, "") + reqUrl.search, location.origin);
+            const cleanPath = reqUrl.pathname.replace(/^\\/+/, "");
+            const remapped = new URL(APP_PREFIX + cleanPath + reqUrl.search, location.origin);
             event.respondWith(fetch(remapped, event.request));
             return;
           }
@@ -113,7 +114,7 @@ function runBuild() {
     fs.writeFileSync(swPath, swHeader + "\n" + content, "utf8");
   }
 
-  // 7. Patch hardcoded paths in JS bundles
+  // 7. Patch hardcoded paths in JS bundles (without creating duplicate prefixes)
   function deepPatch(dir) {
     for (const item of fs.readdirSync(dir)) {
       const fullPath = path.join(dir, item);
@@ -122,14 +123,12 @@ function runBuild() {
         if (item !== ".git") deepPatch(fullPath);
       } else if (/\.(html|js|json|webmanifest|css)$/i.test(item)) {
         let text = fs.readFileSync(fullPath, "utf8");
+        // Only prepend repoPrefix if not already prefixed
         const updated = text
-          .replace(/\/runtime\/baremux\/index\.js/g, `${repoPrefix}runtime/baremux/index.js`)
-          .replace(/\/runtime\/baremux\/worker\.js/g, `${repoPrefix}runtime/baremux/worker.js`)
-          .replace(/\/runtime\/scramjet\//g, `${repoPrefix}runtime/scramjet/`)
-          .replace(/(['"`])\/runtime\//g, `$1${repoPrefix}runtime/`)
-          .replace(/(['"`])\/branding\//g, `$1${repoPrefix}branding/`)
-          .replace(/(['"`])\/assets\//g, `$1${repoPrefix}assets/`)
-          .replace(/(['"`])\/sw\.js/g, `$1${repoPrefix}sw.js`);
+          .replace(/(['"`])\/(?!5k-links-10-8-2026-v4\/)runtime\//g, `$1${repoPrefix}runtime/`)
+          .replace(/(['"`])\/(?!5k-links-10-8-2026-v4\/)branding\//g, `$1${repoPrefix}branding/`)
+          .replace(/(['"`])\/(?!5k-links-10-8-2026-v4\/)assets\//g, `$1${repoPrefix}assets/`)
+          .replace(/(['"`])\/(?!5k-links-10-8-2026-v4\/)sw\.js/g, `$1${repoPrefix}sw.js`);
 
         if (updated !== text) {
           fs.writeFileSync(fullPath, updated, "utf8");
@@ -139,16 +138,18 @@ function runBuild() {
   }
   deepPatch(distDir);
 
-  // 8. Application HTML template
+  // 8. Application HTML template (NO <base> tag to avoid double prefixing)
   const rawHtmlPath = path.join(distDir, "index.html");
   let appHtml = fs.readFileSync(rawHtmlPath, "utf8");
   appHtml = appHtml.replace(/<link[^>]+rel=["']preload["'][^>]*>/gi, "");
+  appHtml = appHtml.replace(/<base[^>]*>/gi, ""); // Strip any existing base tag
+
+  // Replace root paths that are not yet prefixed
   appHtml = appHtml
-    .replace(/(href|src)=["']\/(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`)
-    .replace(/url\(['"]?\/([^'")]+)['"]?\)/gi, `url("${repoPrefix}$1")`);
+    .replace(/(href|src)=["']\/(?!5k-links-10-8-2026-v4\/)(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`)
+    .replace(/url\(['"]?\/(?!5k-links-10-8-2026-v4\/)([^'")]+)['"]?\)/gi, `url("${repoPrefix}$1")`);
 
   const runtimeScript = `
-  <base href="${repoPrefix}">
   <link rel="icon" type="image/png" href="${repoPrefix}branding/lucide.png">
   <link rel="shortcut icon" type="image/png" href="${repoPrefix}branding/lucide.png">
   <script>
@@ -188,13 +189,17 @@ function runBuild() {
       window.fetch = async function(...args) {
         if (typeof args[0] === "string") {
           let u = args[0];
-          if (u.startsWith("/runtime/") || u.startsWith("/branding/") || u.startsWith("/assets/") || u.startsWith("/baremux/")) {
-            args[0] = BASE + u.replace(/^\\/+/, "");
-          } else if (u === "sw.js" || u === "/sw.js") {
-            args[0] = BASE + "sw.js";
-          } else if (u === "worker.js" || u === "/worker.js") {
-            args[0] = BASE + "worker.js";
-          } else if (u.includes("/api/auth/session")) {
+          // Prepend BASE only if not already prefixed
+          if (!u.startsWith(BASE)) {
+            if (u.startsWith("/runtime/") || u.startsWith("/branding/") || u.startsWith("/assets/") || u.startsWith("/baremux/")) {
+              args[0] = BASE + u.replace(/^\\/+/, "");
+            } else if (u === "sw.js" || u === "/sw.js") {
+              args[0] = BASE + "sw.js";
+            } else if (u === "worker.js" || u === "/worker.js") {
+              args[0] = BASE + "worker.js";
+            }
+          }
+          if (u.includes("/api/auth/session")) {
             return new Response(JSON.stringify({ user: null, authenticated: false }), {
               status: 200,
               headers: { "Content-Type": "application/json" }
@@ -217,7 +222,7 @@ function runBuild() {
       const OrigWorker = window.Worker;
       window.Worker = function(url, opts) {
         let u = url.toString();
-        if (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js") || u.includes("baremux")) {
+        if (!u.startsWith(BASE) && (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js") || u.includes("baremux"))) {
           u = BASE + u.replace(/^\\/+/, "");
         }
         return new OrigWorker(u, opts);
@@ -227,7 +232,7 @@ function runBuild() {
         const OrigShared = window.SharedWorker;
         window.SharedWorker = function(url, opts) {
           let u = url.toString();
-          if (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js") || u.includes("baremux")) {
+          if (!u.startsWith(BASE) && (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js") || u.includes("baremux"))) {
             u = BASE + u.replace(/^\\/+/, "");
           }
           return new OrigShared(u, opts);
@@ -236,9 +241,7 @@ function runBuild() {
     })();
   </script>`;
 
-  if (!appHtml.includes("<base ")) {
-    appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${runtimeScript}`);
-  }
+  appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${runtimeScript}`);
 
   // 9. SPA 404 Fallback
   const spaFallback = `<!DOCTYPE html>
@@ -275,7 +278,7 @@ function runBuild() {
     if (fs.existsSync(p)) fileBuffers[name] = fs.readFileSync(p);
   }
 
-  // 11. Generate 5,000 unique subdirectories
+  // 11. Generate 5,000 subdirectories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -326,7 +329,7 @@ function runBuild() {
     masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 12. Root Directory Index
+  // 12. Write Root Directory Index
   const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
