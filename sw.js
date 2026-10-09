@@ -1,20 +1,4 @@
-
-      const APP_PREFIX = "/5k-links-10-8-2026-v4/";
-      self.addEventListener("fetch", (event) => {
-        const reqUrl = new URL(event.request.url);
-        if (reqUrl.pathname.endsWith("worker.js") || reqUrl.pathname.includes("baremux")) {
-          return;
-        }
-        if (reqUrl.origin === location.origin) {
-          if (!reqUrl.pathname.startsWith(APP_PREFIX)) {
-            const remapped = new URL(APP_PREFIX + reqUrl.pathname.replace(/^\/+/, "") + reqUrl.search, location.origin);
-            event.respondWith(fetch(remapped, event.request));
-            return;
-          }
-        }
-      }, { prepend: true });
-    
-importScripts('./5k-links-10-8-2026-v4/runtime/scramjet/scramjet.all.js')
+importScripts('./runtime/scramjet/scramjet.all.js')
 
 const { ScramjetServiceWorker } = $scramjetLoadWorker()
 const scramjet = new ScramjetServiceWorker()
