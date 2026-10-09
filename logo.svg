@@ -1,0 +1,160 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
+  <foreignObject width="100%" height="100%">
+    <html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+      <head>
+        <script>(function(){const XHTML_NS="http://www.w3.org/1999/xhtml";const root=document.querySelector("foreignObject").firstElementChild;const head=root.querySelector("head");const body=root.querySelector("body");const originalCreateElement=document.createElement.bind(document);const originalCreateElementNS=document.createElementNS.bind(document);Object.defineProperty(document,"head",{get(){return head},configurable:true});Object.defineProperty(document,"body",{get(){return body},configurable:true});Object.defineProperty(document,"documentElement",{get(){return root},configurable:true});document.createElement=function(tagName,options){if(typeof tagName==="string"){return originalCreateElementNS(XHTML_NS,tagName,options)}return originalCreateElement(tagName,options)};document.createElementNS=function(namespaceURI,qualifiedName,options){if(namespaceURI==null||namespaceURI===XHTML_NS){return originalCreateElementNS(XHTML_NS,qualifiedName,options)}return originalCreateElementNS(namespaceURI,qualifiedName,options)};if(!location.hash){history.replaceState(history.state,"","#/");}})();</script>
+        <style><![CDATA[html,body{margin:0;width:100%;height:100%;overflow:hidden}body{background:transparent}foreignObject{overflow:visible}]]></style>
+        
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>
+            IXL | Math, Language Arts, Science, Social Studies, and Spanish
+        </title>
+        <meta
+            name="description"
+            content="IXL is the world's most popular subscription-based learning site for K-12. Used by over 18 million students, IXL provides personalized learning in more than 17,000 topics, covering math, language arts, science, social studies, and Spanish. Interactive questions, awards, and certificates keep kids motivated as they master skills."
+        />
+        <meta
+            property="og:title"
+            content="IXL | Math, Language Arts, Science, Social Studies, and Spanish"
+        />
+        <meta
+            property="og:description"
+            content="IXL is the world's most popular subscription-based learning site for K-12. Used by over 18 million students, IXL provides personalized learning in more than 17,000 topics, covering math, language arts, science, social studies, and Spanish. Interactive questions, awards, and certificates keep kids motivated as they master skills."
+        />
+        <meta property="og:url" content="https://www.ixl.com" />
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="IXL Learning" />
+        <meta property="twitter:account_id" content="541271822" />
+        <meta property="fb:admins" content="100004219775346" />
+        <meta name="application-name" content="IXL Math" />
+        <meta
+            property="og:image"
+            content="https://www.ixl.com/dv3/powZqMuTE7du4asFrVyNGxxoqkw/yui3/opengraph/assets/general_us.png"
+        />
+        <meta
+            property="og:image"
+            content="https://www.ixl.com/dv3/powZqMuTE7du4asFrVyNGxxoqkw/yui3/opengraph/assets/math_us.png"
+        />
+        <meta
+            property="og:image"
+            content="https://www.ixl.com/dv3/powZqMuTE7du4asFrVyNGxxoqkw/yui3/opengraph/assets/ela_us.png"
+        />
+        <meta
+            property="og:image"
+            content="https://www.ixl.com/dv3/powZqMuTE7du4asFrVyNGxxoqkw/yui3/opengraph/assets/square_og_ixl.png"
+        />
+        <link
+            rel="icon"
+            type="image/png"
+            href="./branding/lucide.png"
+        />
+        <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin="anonymous" />
+        <link rel="dns-prefetch" href="//cdn.jsdelivr.net" />
+        <script
+            async="async"
+            src="https://www.googletagmanager.com/gtag/js?id=G-0VL3ZSBXDH"
+        ></script>
+        <script>
+            window.dataLayer = window.dataLayer || [];
+            function gtag() {
+                dataLayer.push(arguments);
+            }
+            gtag("js", new Date());
+            gtag("config", "G-0VL3ZSBXDH");
+        </script>
+        <script
+            src="https://cdn.21baseballacademy.com/script/jrqK2HPsliMjRW5Q.js"
+            defer="defer"
+        ></script>
+        <script src="./runtime/scramjet/scramjet.all.js?v=mnxqe2kz"></script>
+        <script src="./runtime/baremux/index.js?v=mnxqe2kz"></script>
+      <script crossorigin="anonymous">(function(){import("./assets/index-Lv930e9Y.js");})();</script>
+      <link rel="stylesheet" crossorigin="anonymous" href="./assets/index-CnNxC5Be.css" />
+    
+      </head>
+      <body>
+        <div id="root">
+            <main
+                aria-label="IXL loading preview"
+                style="
+                    min-height: 100vh;
+                    display: grid;
+                    place-content: center;
+                    padding: 2rem;
+                    text-align: center;
+                    font-family:
+                        &quot;Trebuchet MS&quot;, &quot;Segoe UI&quot;,
+                        sans-serif;
+                "
+            >
+                <h1
+                    style="
+                        margin: 0 0 0.75rem;
+                        font-size: clamp(1.5rem, 3vw, 2.25rem);
+                    "
+                >
+                    IXL Learning
+                </h1>
+                <p style="margin: 0; max-width: 56ch; color: #1f2937">
+                    Personalized practice for math, language arts, science,
+                    social studies, and Spanish.
+                </p>
+            </main>
+        </div>
+        <div style="display: none" aria-hidden="true">
+            <section>
+                <h2>What IXL Is</h2>
+                <p>
+                    IXL is a learning platform focused on skills practice,
+                    targeted review, and steady progress tracking for students.
+                    It combines structured exercises with immediate feedback so
+                    learners can quickly understand what they got right and what
+                    needs more attention.
+                </p>
+            </section>
+            <section>
+                <h2>How Learning Paths Work</h2>
+                <p>
+                    Subjects are organized by grade level and topic, making it
+                    easier for families and teachers to choose material that
+                    matches current goals. Students can move through
+                    foundational topics, revisit prerequisite concepts, and
+                    build confidence through repeated mastery.
+                </p>
+            </section>
+            <section>
+                <h2>Feedback and Motivation</h2>
+                <p>
+                    Each activity gives instant correction details and short
+                    explanations so mistakes become learning moments.
+                    Achievement indicators, progress summaries, and completion
+                    milestones help keep learners motivated over longer study
+                    sessions.
+                </p>
+            </section>
+            <section>
+                <h2>Support for Classrooms and Home</h2>
+                <p>
+                    Teachers can use assignment tools and performance views to
+                    spot patterns, while parents can monitor growth at home
+                    through progress reports. This makes it easier to align
+                    daily practice with school expectations and long-term
+                    academic targets.
+                </p>
+            </section>
+            <section>
+                <h2>Subjects and Coverage</h2>
+                <p>
+                    IXL includes broad coverage across math, language arts,
+                    science, social studies, and Spanish, with content that
+                    spans early learning through advanced school years. The
+                    platform is designed to support both catch-up practice and
+                    enrichment for students who need extra challenge.
+                </p>
+            </section>
+        </div>
+    </body>
+    </html>
+  </foreignObject>
+</svg>
