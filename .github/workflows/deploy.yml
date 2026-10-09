@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: 18
 
-      - name: Fetch Upstream and Generate 5k Shells
+      - name: Fetch Upstream, Patch Scramjet, and Generate 5k Shells
         run: |
           node -e '
           const fs = require("fs");
@@ -38,6 +38,7 @@ jobs:
             ? process.env.GITHUB_REPOSITORY.split("/")[1]
             : "5k-links-10-8-2026-v4";
           const repoPrefix = `/${repoName}/`;
+          const fullScramPrefix = `${repoPrefix}scram/`;
 
           // 1. Download and extract scientific-studying/svg@main directly into dist
           console.log("Extracting upstream application...");
@@ -46,15 +47,53 @@ jobs:
           execSync(`tar -xzf "${tarPath}" -C "${distDir}" --strip-components=1`);
           fs.rmSync(tarPath, { force: true });
 
-          // 2. Rename the root index.html to app.html so it serves the full React app
+          // 2. Rename root index.html to app.html so the iframe shell can load it
           const origHtml = path.join(distDir, "index.html");
           const appShellHtml = path.join(distDir, "app.html");
           if (fs.existsSync(origHtml)) {
             fs.renameSync(origHtml, appShellHtml);
           }
 
-          // 3. Template for the 5,000 subfolders
-          // The wrapper renders full-screen and delegates execution to app.html at root
+          // 3. Patch Scramjet prefix (/scram/ -> /repoName/scram/) across all bundles and configs
+          const prefixRegex = /(['"`])\/scram\//g;
+
+          // Patch sw.js
+          const swPath = path.join(distDir, "sw.js");
+          if (fs.existsSync(swPath)) {
+            let swCode = fs.readFileSync(swPath, "utf8");
+            swCode = swCode.replace(prefixRegex, `$1${fullScramPrefix}`);
+            fs.writeFileSync(swPath, swCode);
+          }
+
+          // Patch app.html
+          if (fs.existsSync(appShellHtml)) {
+            let htmlCode = fs.readFileSync(appShellHtml, "utf8");
+            htmlCode = htmlCode.replace(prefixRegex, `$1${fullScramPrefix}`);
+            fs.writeFileSync(appShellHtml, htmlCode);
+          }
+
+          // Patch JavaScript assets
+          const assetsDir = path.join(distDir, "assets");
+          if (fs.existsSync(assetsDir)) {
+            for (const file of fs.readdirSync(assetsDir)) {
+              if (file.endsWith(".js")) {
+                const p = path.join(assetsDir, file);
+                let bundle = fs.readFileSync(p, "utf8");
+                bundle = bundle.replace(prefixRegex, `$1${fullScramPrefix}`);
+                fs.writeFileSync(p, bundle);
+              }
+            }
+          }
+
+          // Patch scramjet.all.js if it contains hardcoded prefix defaults
+          const scramjetAll = path.join(distDir, "runtime", "scramjet", "scramjet.all.js");
+          if (fs.existsSync(scramjetAll)) {
+            let scramjetCode = fs.readFileSync(scramjetAll, "utf8");
+            scramjetCode = scramjetCode.replace(prefixRegex, `$1${fullScramPrefix}`);
+            fs.writeFileSync(scramjetAll, scramjetCode);
+          }
+
+          // 4. Lightweight subfolder template
           const pageTemplate = `<!DOCTYPE html>
           <html lang="en">
           <head>
@@ -72,7 +111,7 @@ jobs:
           </body>
           </html>`;
 
-          // 4. Generate random nested paths
+          // 5. Generate 5,000 subfolder paths
           const TOTAL_PAGES = 5000;
           const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -97,7 +136,7 @@ jobs:
 
           let masterLinksHtml = "";
 
-          // 5. Write lightweight wrapper index.html into each subfolder
+          // 6. Write wrapper index.html into each folder
           for (const nestedPath of uniquePaths) {
             const folderPath = path.join(distDir, nestedPath);
             fs.mkdirSync(folderPath, { recursive: true });
@@ -105,7 +144,7 @@ jobs:
             masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
           }
 
-          // 6. Root Directory Index Dashboard
+          // 7. Generate directory index dashboard
           const masterIndexHtml = `<!DOCTYPE html>
           <html lang="en">
           <head>
@@ -157,7 +196,7 @@ jobs:
           </html>`;
 
           fs.writeFileSync(path.join(distDir, "index.html"), masterIndexHtml);
-          console.log("Successfully generated wrapper shells.");
+          console.log("Build and patch completed successfully.");
           '
 
       - name: Deploy to GitHub Pages
