@@ -1,5 +1,7 @@
 const fs = require("fs");
 const path = require("path");
+const https = require("https");
+const { execSync } = require("child_process");
 
 const distDir = path.join(process.cwd(), "dist_deploy");
 if (fs.existsSync(distDir)) {
@@ -13,26 +15,29 @@ const repoName = process.env.GITHUB_REPOSITORY
   : "5k-links-10-8-2026-v4";
 const repoPrefix = `/${repoName}/`;
 
-function copyRecursive(src, dest) {
-  if (!fs.existsSync(src)) return;
-  const stat = fs.statSync(src);
-  if (stat.isDirectory()) {
-    fs.mkdirSync(dest, { recursive: true });
-    for (const item of fs.readdirSync(src)) {
-      copyRecursive(path.join(src, item), path.join(dest, item));
-    }
-  } else {
-    fs.copyFileSync(src, dest);
-  }
+function downloadBuffer(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { "User-Agent": "Node-Build-Script" } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return downloadBuffer(res.headers.location).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        return reject(new Error(`Failed to fetch ${url}, status: ${res.statusCode}`));
+      }
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+    }).on("error", reject);
+  });
 }
 
-function copyFlatFiles(srcDir, targetDir) {
+function copyAllFilesToTarget(srcDir, targetDir) {
   if (!fs.existsSync(srcDir)) return;
   for (const item of fs.readdirSync(srcDir)) {
     const fullSrc = path.join(srcDir, item);
     const stat = fs.statSync(fullSrc);
     if (stat.isDirectory()) {
-      copyFlatFiles(fullSrc, targetDir);
+      copyAllFilesToTarget(fullSrc, targetDir);
     } else {
       const fullDest = path.join(targetDir, item);
       if (!fs.existsSync(fullDest)) {
@@ -42,34 +47,82 @@ function copyFlatFiles(srcDir, targetDir) {
   }
 }
 
-function runBuild() {
-  console.log("Building directly from committed repository assets...");
+async function runBuild() {
+  console.log("Fetching upstream repository package...");
 
-  // 1. Copy repository files into dist_deploy
-  const rootItems = fs.readdirSync(process.cwd());
-  for (const item of rootItems) {
-    if (["dist_deploy", ".git", ".github", "node_modules", "build.js"].includes(item)) continue;
-    copyRecursive(path.join(process.cwd(), item), path.join(distDir, item));
+  const repoTarUrl = "https://codeload.github.com/scientific-studying/svg/tar.gz/refs/heads/main";
+  const tarPath = path.join(process.cwd(), "temp_svg.tar.gz");
+  const extractDir = path.join(process.cwd(), "temp_svg_extracted");
+
+  try {
+    const tarBuffer = await downloadBuffer(repoTarUrl);
+    fs.writeFileSync(tarPath, tarBuffer);
+
+    if (fs.existsSync(extractDir)) {
+      fs.rmSync(extractDir, { recursive: true, force: true });
+    }
+    fs.mkdirSync(extractDir, { recursive: true });
+
+    execSync(`tar -xzf "${tarPath}" -C "${extractDir}" --strip-components=1`);
+    console.log("Remote source extracted.");
+  } catch (err) {
+    console.error("Failed to download or extract source repository:", err.message);
+    process.exit(1);
   }
 
-  // 2. Mirror assets directly into root for flat fallback lookups
-  copyFlatFiles(path.join(distDir, "assets"), distDir);
-  copyFlatFiles(path.join(distDir, "runtime"), distDir);
-  copyFlatFiles(path.join(distDir, "branding"), distDir);
+  // 1. Git LFS rules
+  const gitattributesContent = [
+    "books/html/fnafi/* filter=lfs diff=lfs merge=lfs -text",
+    "books/html/fnafi3/* filter=lfs diff=lfs merge=lfs -text",
+    "*.zip filter=lfs diff=lfs merge=lfs -text",
+    "*.wasm filter=lfs diff=lfs merge=lfs -text",
+    "*.wasm.wasm filter=lfs diff=lfs merge=lfs -text",
+    ""
+  ].join("\n");
+  fs.writeFileSync(path.join(distDir, ".gitattributes"), gitattributesContent);
 
-  // 3. Mirror Bare-Mux explicitly to baremux/ and dist root
-  const baremuxDir = path.join(distDir, "runtime", "baremux");
+  // 2. Mirror remote repository folders to dist_deploy
+  const remoteItems = fs.readdirSync(extractDir);
+  for (const item of remoteItems) {
+    const src = path.join(extractDir, item);
+    const dest = path.join(distDir, item);
+    if (fs.statSync(src).isDirectory()) {
+      fs.cpSync(src, dest, { recursive: true });
+    } else {
+      fs.copyFileSync(src, dest);
+    }
+  }
+
+  // 3. Mirror all assets directly to dist_deploy root
+  copyAllFilesToTarget(path.join(extractDir, "assets"), distDir);
+  copyAllFilesToTarget(path.join(extractDir, "runtime"), distDir);
+  copyAllFilesToTarget(path.join(extractDir, "branding"), distDir);
+
+  const localDirs = ["books", "dist"];
+  for (const d of localDirs) {
+    if (fs.existsSync(d)) {
+      fs.cpSync(d, path.join(distDir, d), { recursive: true });
+      copyAllFilesToTarget(path.join(process.cwd(), d), distDir);
+    }
+  }
+
+  // 4. Ensure Bare-Mux files exist in root, baremux/, and runtime/baremux/
+  const baremuxDir = path.join(extractDir, "runtime", "baremux");
   if (fs.existsSync(baremuxDir)) {
-    const targets = [path.join(distDir, "baremux"), distDir];
-    for (const t of targets) {
-      fs.mkdirSync(t, { recursive: true });
-      for (const f of fs.readdirSync(baremuxDir)) {
-        fs.copyFileSync(path.join(baremuxDir, f), path.join(t, f));
+    const baremuxTargets = [
+      path.join(distDir, "baremux"),
+      path.join(distDir, "runtime", "baremux"),
+      distDir
+    ];
+    for (const target of baremuxTargets) {
+      fs.mkdirSync(target, { recursive: true });
+      for (const file of fs.readdirSync(baremuxDir)) {
+        fs.copyFileSync(path.join(baremuxDir, file), path.join(target, file));
       }
     }
   }
 
-  // 4. Handle scramjet.wasm.wasm single and double extensions
+  // 5. Scramjet binary mappings
   const scramjetDir = path.join(distDir, "runtime", "scramjet");
   if (fs.existsSync(scramjetDir)) {
     const doubleWasm = path.join(scramjetDir, "scramjet.wasm.wasm");
@@ -79,21 +132,27 @@ function runBuild() {
       fs.copyFileSync(doubleWasm, path.join(distDir, "scramjet.wasm.wasm"));
       fs.copyFileSync(doubleWasm, path.join(distDir, "scramjet.wasm"));
     }
+    const scramjetAll = path.join(scramjetDir, "scramjet.all.js");
+    if (fs.existsSync(scramjetAll)) {
+      fs.copyFileSync(scramjetAll, path.join(distDir, "scramjet.all.js"));
+    }
   }
 
-  // 5. Place lucide.png at root and inside assets/
+  // 6. Ensure lucide.png exists everywhere
   const lucideSrc = path.join(distDir, "branding", "lucide.png");
   if (fs.existsSync(lucideSrc)) {
-    const buf = fs.readFileSync(lucideSrc);
-    fs.writeFileSync(path.join(distDir, "lucide.png"), buf);
+    const lucideBuf = fs.readFileSync(lucideSrc);
+    fs.writeFileSync(path.join(distDir, "lucide.png"), lucideBuf);
+    fs.mkdirSync(path.join(distDir, "branding"), { recursive: true });
+    fs.writeFileSync(path.join(distDir, "branding", "lucide.png"), lucideBuf);
     fs.mkdirSync(path.join(distDir, "assets"), { recursive: true });
-    fs.writeFileSync(path.join(distDir, "assets", "lucide.png"), buf);
+    fs.writeFileSync(path.join(distDir, "assets", "lucide.png"), lucideBuf);
   }
 
-  // 6. Patch sw.js to prevent duplicate prefixing
+  // 7. Patch sw.js to allow worker scripts to bypass intercepts
   const swPath = path.join(distDir, "sw.js");
   if (fs.existsSync(swPath)) {
-    let content = fs.readFileSync(swPath, "utf8");
+    let swContent = fs.readFileSync(swPath, "utf8");
     const swHeader = `
       const APP_PREFIX = "${repoPrefix}";
       self.addEventListener("fetch", (event) => {
@@ -103,18 +162,18 @@ function runBuild() {
         }
         if (reqUrl.origin === location.origin) {
           if (!reqUrl.pathname.startsWith(APP_PREFIX)) {
-            const cleanPath = reqUrl.pathname.replace(/^\\/+/, "");
-            const remapped = new URL(APP_PREFIX + cleanPath + reqUrl.search, location.origin);
+            const remapped = new URL(APP_PREFIX + reqUrl.pathname.replace(/^\\/+/, "") + reqUrl.search, location.origin);
             event.respondWith(fetch(remapped, event.request));
             return;
           }
         }
       }, { prepend: true });
     `;
-    fs.writeFileSync(swPath, swHeader + "\n" + content, "utf8");
+    swContent = swHeader + "\n" + swContent;
+    fs.writeFileSync(swPath, swContent, "utf8");
   }
 
-  // 7. Patch hardcoded paths in JS bundles (without creating duplicate prefixes)
+  // 8. Patch hardcoded paths inside JS bundles
   function deepPatch(dir) {
     for (const item of fs.readdirSync(dir)) {
       const fullPath = path.join(dir, item);
@@ -122,15 +181,17 @@ function runBuild() {
       if (stat.isDirectory()) {
         if (item !== ".git") deepPatch(fullPath);
       } else if (/\.(html|js|json|webmanifest|css)$/i.test(item)) {
-        let text = fs.readFileSync(fullPath, "utf8");
-        // Only prepend repoPrefix if not already prefixed
-        const updated = text
-          .replace(/(['"`])\/(?!5k-links-10-8-2026-v4\/)runtime\//g, `$1${repoPrefix}runtime/`)
-          .replace(/(['"`])\/(?!5k-links-10-8-2026-v4\/)branding\//g, `$1${repoPrefix}branding/`)
-          .replace(/(['"`])\/(?!5k-links-10-8-2026-v4\/)assets\//g, `$1${repoPrefix}assets/`)
-          .replace(/(['"`])\/(?!5k-links-10-8-2026-v4\/)sw\.js/g, `$1${repoPrefix}sw.js`);
+        let content = fs.readFileSync(fullPath, "utf8");
+        const updated = content
+          .replace(/\/runtime\/baremux\/index\.js/g, `${repoPrefix}runtime/baremux/index.js`)
+          .replace(/\/runtime\/baremux\/worker\.js/g, `${repoPrefix}runtime/baremux/worker.js`)
+          .replace(/\/runtime\/scramjet\//g, `${repoPrefix}runtime/scramjet/`)
+          .replace(/(['"`])\/runtime\//g, `$1${repoPrefix}runtime/`)
+          .replace(/(['"`])\/branding\//g, `$1${repoPrefix}branding/`)
+          .replace(/(['"`])\/assets\//g, `$1${repoPrefix}assets/`)
+          .replace(/(['"`])\/sw\.js/g, `$1${repoPrefix}sw.js`);
 
-        if (updated !== text) {
+        if (updated !== content) {
           fs.writeFileSync(fullPath, updated, "utf8");
         }
       }
@@ -138,23 +199,29 @@ function runBuild() {
   }
   deepPatch(distDir);
 
-  // 8. Application HTML template (NO <base> tag to avoid double prefixing)
-  const rawHtmlPath = path.join(distDir, "index.html");
-  let appHtml = fs.readFileSync(rawHtmlPath, "utf8");
+  // 9. Prepare application HTML template with root rewrites
+  const rawHtmlPath = path.join(extractDir, "index.html");
+  let appHtml = fs.existsSync(rawHtmlPath)
+    ? fs.readFileSync(rawHtmlPath, "utf8")
+    : fs.readFileSync("index.html", "utf8");
+
   appHtml = appHtml.replace(/<link[^>]+rel=["']preload["'][^>]*>/gi, "");
-  appHtml = appHtml.replace(/<base[^>]*>/gi, ""); // Strip any existing base tag
 
-  // Replace root paths that are not yet prefixed
+  // Convert all relative (./assets/, assets/) and root (/assets/) paths to absolute repoPrefix
   appHtml = appHtml
-    .replace(/(href|src)=["']\/(?!5k-links-10-8-2026-v4\/)(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`)
-    .replace(/url\(['"]?\/(?!5k-links-10-8-2026-v4\/)([^'")]+)['"]?\)/gi, `url("${repoPrefix}$1")`);
+    .replace(/(href|src)=["'](?:\.?\/)?assets\/(.*?)["']/gi, `$1="${repoPrefix}assets/$2"`)
+    .replace(/(href|src)=["'](?:\.?\/)?runtime\/(.*?)["']/gi, `$1="${repoPrefix}runtime/$2"`)
+    .replace(/(href|src)=["'](?:\.?\/)?branding\/(.*?)["']/gi, `$1="${repoPrefix}branding/$2"`)
+    .replace(/(href|src)=["']\/(?!\/)(.*?)["']/gi, `$1="${repoPrefix}$2"`);
 
-  const runtimeScript = `
+  const routerAndRuntimePatch = `
+  <base href="${repoPrefix}">
   <link rel="icon" type="image/png" href="${repoPrefix}branding/lucide.png">
   <link rel="shortcut icon" type="image/png" href="${repoPrefix}branding/lucide.png">
   <script>
     (function() {
       const BASE = "${repoPrefix}";
+
       window.__bareMuxPath = BASE + "runtime/baremux/worker.js";
       window.BareMux = window.BareMux || {};
       window.BareMux.workerPath = BASE + "runtime/baremux/worker.js";
@@ -189,17 +256,13 @@ function runBuild() {
       window.fetch = async function(...args) {
         if (typeof args[0] === "string") {
           let u = args[0];
-          // Prepend BASE only if not already prefixed
-          if (!u.startsWith(BASE)) {
-            if (u.startsWith("/runtime/") || u.startsWith("/branding/") || u.startsWith("/assets/") || u.startsWith("/baremux/")) {
-              args[0] = BASE + u.replace(/^\\/+/, "");
-            } else if (u === "sw.js" || u === "/sw.js") {
-              args[0] = BASE + "sw.js";
-            } else if (u === "worker.js" || u === "/worker.js") {
-              args[0] = BASE + "worker.js";
-            }
-          }
-          if (u.includes("/api/auth/session")) {
+          if (u.startsWith("/runtime/") || u.startsWith("/branding/") || u.startsWith("/assets/") || u.startsWith("/books/") || u.startsWith("/baremux/")) {
+            args[0] = BASE + u.replace(/^\\/+/, "");
+          } else if (u === "sw.js" || u === "/sw.js") {
+            args[0] = BASE + "sw.js";
+          } else if (u === "worker.js" || u === "/worker.js") {
+            args[0] = BASE + "worker.js";
+          } else if (u.includes("/api/auth/session")) {
             return new Response(JSON.stringify({ user: null, authenticated: false }), {
               status: 200,
               headers: { "Content-Type": "application/json" }
@@ -222,7 +285,7 @@ function runBuild() {
       const OrigWorker = window.Worker;
       window.Worker = function(url, opts) {
         let u = url.toString();
-        if (!u.startsWith(BASE) && (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js") || u.includes("baremux"))) {
+        if (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js") || u.includes("baremux")) {
           u = BASE + u.replace(/^\\/+/, "");
         }
         return new OrigWorker(u, opts);
@@ -232,7 +295,7 @@ function runBuild() {
         const OrigShared = window.SharedWorker;
         window.SharedWorker = function(url, opts) {
           let u = url.toString();
-          if (!u.startsWith(BASE) && (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js") || u.includes("baremux"))) {
+          if (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js") || u.includes("baremux")) {
             u = BASE + u.replace(/^\\/+/, "");
           }
           return new OrigShared(u, opts);
@@ -241,9 +304,10 @@ function runBuild() {
     })();
   </script>`;
 
-  appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${runtimeScript}`);
+  // Inject at the very beginning of <head>
+  appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${routerAndRuntimePatch}`);
 
-  // 9. SPA 404 Fallback
+  // 10. SPA 404 Fallback
   const spaFallback = `<!DOCTYPE html>
 <html>
 <head>
@@ -256,12 +320,17 @@ function runBuild() {
   </script>
 </head>
 <body>
-  <script>window.location.replace("${repoPrefix}");</script>
+  <script>
+    window.location.replace("${repoPrefix}");
+  </script>
 </body>
 </html>`;
   fs.writeFileSync(path.join(distDir, "404.html"), spaFallback);
 
-  // 10. Cache local files for subfolders
+  fs.rmSync(tarPath, { force: true });
+  fs.rmSync(extractDir, { recursive: true, force: true });
+
+  // 11. Read local files to copy into each subfolder
   const localCopies = [
     "sw.js",
     "worker.js",
@@ -275,10 +344,12 @@ function runBuild() {
   const fileBuffers = {};
   for (const name of localCopies) {
     const p = path.join(distDir, name);
-    if (fs.existsSync(p)) fileBuffers[name] = fs.readFileSync(p);
+    if (fs.existsSync(p)) {
+      fileBuffers[name] = fs.readFileSync(p);
+    }
   }
 
-  // 11. Generate 5,000 subdirectories
+  // 12. Generate 5,000 subdirectories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -306,6 +377,7 @@ function runBuild() {
   for (const nestedPath of uniquePaths) {
     const folderPath = path.join(distDir, nestedPath);
     fs.mkdirSync(folderPath, { recursive: true });
+
     fs.writeFileSync(path.join(folderPath, "index.html"), appHtml);
 
     for (const [fname, buf] of Object.entries(fileBuffers)) {
@@ -329,7 +401,7 @@ function runBuild() {
     masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 12. Write Root Directory Index
+  // 13. Root Landing Dashboard
   const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
