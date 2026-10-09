@@ -70,17 +70,18 @@ async function runBuild() {
     process.exit(1);
   }
 
-  // 1. Git LFS rules for deployment
+  // 1. Setup Git LFS rules
   const gitattributesContent = [
     "books/html/fnafi/* filter=lfs diff=lfs merge=lfs -text",
     "books/html/fnafi3/* filter=lfs diff=lfs merge=lfs -text",
     "*.zip filter=lfs diff=lfs merge=lfs -text",
     "*.wasm filter=lfs diff=lfs merge=lfs -text",
+    "*.wasm.wasm filter=lfs diff=lfs merge=lfs -text",
     ""
   ].join("\n");
   fs.writeFileSync(path.join(distDir, ".gitattributes"), gitattributesContent);
 
-  // 2. Mirror remote repository contents to dist_deploy
+  // 2. Mirror remote repository directory structure to dist_deploy
   const remoteItems = fs.readdirSync(extractDir);
   for (const item of remoteItems) {
     const src = path.join(extractDir, item);
@@ -92,11 +93,12 @@ async function runBuild() {
     }
   }
 
-  // 3. Mirror all assets to root for direct path resolution
+  // 3. Mirror all assets and runtimes directly into the ROOT of dist_deploy
   copyAllFilesToTarget(path.join(extractDir, "assets"), distDir);
   copyAllFilesToTarget(path.join(extractDir, "runtime"), distDir);
   copyAllFilesToTarget(path.join(extractDir, "branding"), distDir);
 
+  // Also retain local books/dist if present
   const localDirs = ["books", "dist"];
   for (const d of localDirs) {
     if (fs.existsSync(d)) {
@@ -105,23 +107,31 @@ async function runBuild() {
     }
   }
 
-  // Copy Bare-Mux worker and index assets
-  const baremuxDir = path.join(distDir, "runtime", "baremux");
+  // 4. Mirror Bare-Mux explicitly to root, baremux/, and runtime/baremux/
+  const baremuxDir = path.join(extractDir, "runtime", "baremux");
   if (fs.existsSync(baremuxDir)) {
-    for (const f of fs.readdirSync(baremuxDir)) {
-      fs.copyFileSync(path.join(baremuxDir, f), path.join(distDir, f));
+    const baremuxTargets = [
+      path.join(distDir, "baremux"),
+      path.join(distDir, "runtime", "baremux"),
+      distDir // root: /worker.js, /index.js
+    ];
+    for (const target of baremuxTargets) {
+      fs.mkdirSync(target, { recursive: true });
+      for (const file of fs.readdirSync(baremuxDir)) {
+        fs.copyFileSync(path.join(baremuxDir, file), path.join(target, file));
+      }
     }
   }
 
-  // Double extension and Scramjet handling
+  // 5. Ensure scramjet.wasm.wasm and scramjet.wasm exist at root and runtime/scramjet
   const scramjetDir = path.join(distDir, "runtime", "scramjet");
   if (fs.existsSync(scramjetDir)) {
-    const wasmFile = path.join(scramjetDir, "scramjet.wasm");
     const doubleWasm = path.join(scramjetDir, "scramjet.wasm.wasm");
-    if (fs.existsSync(wasmFile)) {
-      fs.copyFileSync(wasmFile, doubleWasm);
-      fs.copyFileSync(wasmFile, path.join(distDir, "scramjet.wasm"));
-      fs.copyFileSync(wasmFile, path.join(distDir, "scramjet.wasm.wasm"));
+    const singleWasm = path.join(scramjetDir, "scramjet.wasm");
+    if (fs.existsSync(doubleWasm)) {
+      fs.copyFileSync(doubleWasm, singleWasm);
+      fs.copyFileSync(doubleWasm, path.join(distDir, "scramjet.wasm.wasm"));
+      fs.copyFileSync(doubleWasm, path.join(distDir, "scramjet.wasm"));
     }
     const scramjetAll = path.join(scramjetDir, "scramjet.all.js");
     if (fs.existsSync(scramjetAll)) {
@@ -129,26 +139,16 @@ async function runBuild() {
     }
   }
 
-  // Icon mapping
-  let lucideBuf = null;
-  const lucideCandidates = [
-    path.join(distDir, "branding", "lucide.png"),
-    path.join(distDir, "assets", "lucide.png"),
-    path.join(distDir, "lucide.png")
-  ];
-  for (const c of lucideCandidates) {
-    if (fs.existsSync(c)) {
-      lucideBuf = fs.readFileSync(c);
-      break;
-    }
-  }
-  if (lucideBuf) {
-    fs.mkdirSync(path.join(distDir, "branding"), { recursive: true });
+  // 6. Ensure lucide.png exists at the root, in branding/, and assets/
+  const lucideSrc = path.join(distDir, "branding", "lucide.png");
+  if (fs.existsSync(lucideSrc)) {
+    const lucideBuf = fs.readFileSync(lucideSrc);
     fs.writeFileSync(path.join(distDir, "lucide.png"), lucideBuf);
-    fs.writeFileSync(path.join(distDir, "branding", "lucide.png"), lucideBuf);
+    fs.mkdirSync(path.join(distDir, "assets"), { recursive: true });
+    fs.writeFileSync(path.join(distDir, "assets", "lucide.png"), lucideBuf);
   }
 
-  // 4. Service Worker Path Redirect Patch
+  // 7. Patch sw.js so it bypasses worker.js, baremux, and routes prefix paths
   const swPath = path.join(distDir, "sw.js");
   if (fs.existsSync(swPath)) {
     let swContent = fs.readFileSync(swPath, "utf8");
@@ -156,6 +156,10 @@ async function runBuild() {
       const APP_PREFIX = "${repoPrefix}";
       self.addEventListener("fetch", (event) => {
         const reqUrl = new URL(event.request.url);
+        // Let worker.js and baremux load natively as static files
+        if (reqUrl.pathname.endsWith("worker.js") || reqUrl.pathname.includes("baremux")) {
+          return;
+        }
         if (reqUrl.origin === location.origin) {
           if (!reqUrl.pathname.startsWith(APP_PREFIX)) {
             const remapped = new URL(APP_PREFIX + reqUrl.pathname.replace(/^\\/+/, "") + reqUrl.search, location.origin);
@@ -169,7 +173,7 @@ async function runBuild() {
     fs.writeFileSync(swPath, swContent, "utf8");
   }
 
-  // 5. Deep string replacement across bundles
+  // 8. Patch root-relative strings inside bundles
   function deepPatch(dir) {
     for (const item of fs.readdirSync(dir)) {
       const fullPath = path.join(dir, item);
@@ -192,7 +196,7 @@ async function runBuild() {
   }
   deepPatch(distDir);
 
-  // 6. Application HTML Template with Navigation Guard and History Shim
+  // 9. Prepare application HTML template
   const rawHtmlPath = path.join(extractDir, "index.html");
   let appHtml = fs.existsSync(rawHtmlPath)
     ? fs.readFileSync(rawHtmlPath, "utf8")
@@ -211,7 +215,6 @@ async function runBuild() {
     (function() {
       const BASE = "${repoPrefix}";
 
-      // Intercept anchor clicks navigating to "/"
       document.addEventListener("click", function(e) {
         const link = e.target.closest("a");
         if (!link) return;
@@ -223,7 +226,6 @@ async function runBuild() {
         }
       }, true);
 
-      // Keep History API scoped to subpath
       const origPush = history.pushState;
       const origReplace = history.replaceState;
       history.pushState = function(state, unused, url) {
@@ -239,15 +241,16 @@ async function runBuild() {
         return origReplace.apply(this, [state, unused, url]);
       };
 
-      // Mock offline auth endpoints and route local resources
       const origFetch = window.fetch;
       window.fetch = async function(...args) {
         if (typeof args[0] === "string") {
           let u = args[0];
-          if (u.startsWith("/runtime/") || u.startsWith("/branding/") || u.startsWith("/assets/") || u.startsWith("/books/")) {
+          if (u.startsWith("/runtime/") || u.startsWith("/branding/") || u.startsWith("/assets/") || u.startsWith("/books/") || u.startsWith("/baremux/")) {
             args[0] = BASE + u.replace(/^\\/+/, "");
           } else if (u === "sw.js" || u === "/sw.js") {
             args[0] = BASE + "sw.js";
+          } else if (u === "worker.js" || u === "/worker.js") {
+            args[0] = BASE + "worker.js";
           } else if (u.includes("/api/auth/session")) {
             return new Response(JSON.stringify({ user: null, authenticated: false }), {
               status: 200,
@@ -268,11 +271,10 @@ async function runBuild() {
         }
       };
 
-      // Scope Workers
       const OrigWorker = window.Worker;
       window.Worker = function(url, opts) {
         let u = url.toString();
-        if (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js")) {
+        if (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js") || u.includes("baremux")) {
           u = BASE + u.replace(/^\\/+/, "");
         }
         return new OrigWorker(u, opts);
@@ -282,7 +284,7 @@ async function runBuild() {
         const OrigShared = window.SharedWorker;
         window.SharedWorker = function(url, opts) {
           let u = url.toString();
-          if (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js")) {
+          if (u.startsWith("/runtime/") || u.startsWith("/assets/") || u.includes("worker.js") || u.includes("baremux")) {
             u = BASE + u.replace(/^\\/+/, "");
           }
           return new OrigShared(u, opts);
@@ -295,7 +297,7 @@ async function runBuild() {
     appHtml = appHtml.replace(/<head([^>]*)>/i, `<head$1>\n${routerAndRuntimePatch}`);
   }
 
-  // 7. Non-Looping SPA 404 Fallback
+  // 10. SPA 404 Fallback
   const spaFallback = `<!DOCTYPE html>
 <html>
 <head>
@@ -309,7 +311,6 @@ async function runBuild() {
 </head>
 <body>
   <script>
-    // Injected app fallback when subpath routes 404 internally
     window.location.replace("${repoPrefix}");
   </script>
 </body>
@@ -319,13 +320,14 @@ async function runBuild() {
   fs.rmSync(tarPath, { force: true });
   fs.rmSync(extractDir, { recursive: true, force: true });
 
-  // 8. Runtime assets mirrored into subfolders
+  // 11. Read local dependencies into memory to mirror inside each subfolder
   const localCopies = [
     "sw.js",
     "worker.js",
     "scramjet.all.js",
-    "scramjet.wasm",
+    "scramjet.sync.js",
     "scramjet.wasm.wasm",
+    "scramjet.wasm",
     "index.js",
     "lucide.png"
   ];
@@ -337,7 +339,7 @@ async function runBuild() {
     }
   }
 
-  // 9. Generate 5,000 subdirectories
+  // 12. Generate 5,000 subdirectories
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -372,15 +374,25 @@ async function runBuild() {
       fs.writeFileSync(path.join(folderPath, fname), buf);
     }
 
-    if (lucideBuf) {
+    // Explicit baremux folder mirroring inside each nested path
+    if (fileBuffers["worker.js"]) {
+      const subBaremux = path.join(folderPath, "baremux");
+      fs.mkdirSync(subBaremux, { recursive: true });
+      fs.writeFileSync(path.join(subBaremux, "worker.js"), fileBuffers["worker.js"]);
+      if (fileBuffers["index.js"]) {
+        fs.writeFileSync(path.join(subBaremux, "index.js"), fileBuffers["index.js"]);
+      }
+    }
+
+    if (fileBuffers["lucide.png"]) {
       fs.mkdirSync(path.join(folderPath, "branding"), { recursive: true });
-      fs.writeFileSync(path.join(folderPath, "branding", "lucide.png"), lucideBuf);
+      fs.writeFileSync(path.join(folderPath, "branding", "lucide.png"), fileBuffers["lucide.png"]);
     }
 
     masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 10. Dashboard
+  // 13. Root Landing Dashboard
   const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
